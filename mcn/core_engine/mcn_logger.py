@@ -4,6 +4,7 @@ Provides comprehensive error tracking and developer-friendly debugging
 """
 
 import logging
+import os
 import json
 import traceback
 from datetime import datetime
@@ -15,9 +16,13 @@ import sys
 class MCNLogger:
     """Enhanced logging system for MCN with developer-friendly error messages"""
 
-    def __init__(self, log_dir: str = "logs"):
-        self.log_dir = Path(log_dir)
-        self.log_dir.mkdir(exist_ok=True)
+    def __init__(self, log_dir: str = None):
+        try:
+            from .paths import mcn_home
+        except ImportError:
+            from paths import mcn_home
+        self.log_dir = Path(log_dir) if log_dir else mcn_home("logs")
+        self.log_dir.mkdir(parents=True, exist_ok=True)
 
         # Setup different log files
         self.setup_loggers()
@@ -32,6 +37,7 @@ class MCNLogger:
         # Error logger for critical issues
         self.error_logger = logging.getLogger("mcn.errors")
         self.error_logger.setLevel(logging.ERROR)
+        self.error_logger.propagate = False   # full details go to the error log file only
 
         # Developer logger for debugging
         self.dev_logger = logging.getLogger("mcn.dev")
@@ -44,8 +50,9 @@ class MCNLogger:
         """Setup file and console handlers"""
 
         # Console handler with colored output
+        # Keep program output clean by default; MCN_VERBOSE=1 shows engine steps
         console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(logging.INFO)
+        console_handler.setLevel(logging.INFO if os.environ.get("MCN_VERBOSE") else logging.WARNING)
         console_formatter = logging.Formatter(
             "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
         )
@@ -95,8 +102,10 @@ class MCNLogger:
         # Log to error file
         self.error_logger.error(json.dumps(error_data, indent=2))
 
-        # Developer-friendly console output
-        self._print_developer_error(error_data)
+        # Detailed console dump only when debugging MCN itself; users see the
+        # friendly report raised by the interpreter (see diagnostics.py)
+        if os.environ.get("MCN_VERBOSE"):
+            self._print_developer_error(error_data)
 
     def _print_developer_error(self, error_data: Dict[str, Any]):
         """Print developer-friendly error messages"""

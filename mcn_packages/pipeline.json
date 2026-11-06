@@ -1,0 +1,13 @@
+{
+  "name": "pipeline",
+  "version": "3.0.0",
+  "description": "AI-powered data pipelines",
+  "dependencies": [
+    "ai_v3"
+  ],
+  "functions": [
+    "create",
+    "run",
+    "transform"
+  ]
+}

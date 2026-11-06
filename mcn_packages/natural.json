@@ -1,0 +1,12 @@
+{
+  "name": "natural",
+  "version": "3.0.0",
+  "description": "Natural language programming",
+  "dependencies": [
+    "ai_v3"
+  ],
+  "functions": [
+    "translate",
+    "execute"
+  ]
+}

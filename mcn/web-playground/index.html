@@ -1,164 +1,1347 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MCN Playground</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.44.0/min/vs/loader.min.js"></script>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #1e1e1e; color: #fff; }
-
-        .header { background: #2d2d30; padding: 1rem; border-bottom: 1px solid #3e3e42; }
-        .header h1 { color: #fff; font-size: 1.5rem; }
-
-        .container { display: flex; height: calc(100vh - 70px); }
-        .editor-panel { flex: 1; display: flex; flex-direction: column; }
-        .output-panel { width: 400px; background: #252526; border-left: 1px solid #3e3e42; display: flex; flex-direction: column; }
-
-        .toolbar { background: #2d2d30; padding: 0.5rem; border-bottom: 1px solid #3e3e42; }
-        .btn { background: #0e639c; color: white; border: none; padding: 0.5rem 1rem; border-radius: 3px; cursor: pointer; margin-right: 0.5rem; }
-        .btn:hover { background: #1177bb; }
-
-        #editor { flex: 1; }
-        .output { flex: 1; padding: 1rem; overflow-y: auto; font-family: 'Courier New', monospace; font-size: 14px; }
-        .output .log { color: #4fc1ff; margin-bottom: 0.5rem; }
-        .output .error { color: #f48771; margin-bottom: 0.5rem; }
-        .output .success { color: #89d185; margin-bottom: 0.5rem; }
-
-        .status-bar { background: #007acc; color: white; padding: 0.3rem 1rem; font-size: 12px; }
-    </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MCN Studio — Coral Blue IDE</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.44.0/min/vs/loader.min.js"></script>
+  <link rel="stylesheet" href="/static/css/studio.css">
+  <link rel="stylesheet" href="/static/css/theme-jetbrains.css">
 </head>
 <body>
-    <div class="header">
-        <h1>MCN Playground</h1>
+
+<!-- ── Header ──────────────────────────────────────────────────────────── -->
+<!-- ── Header ──────────────────────────────────────────────────────────── -->
+<header>
+  <!-- 1. LEFT: Brand & IDE Menus -->
+  <div class="nav-section nav-left">
+    <div class="logo">
+      <div class="logo-gem">M</div>
+      <span>MCN Studio</span>
+      <span class="logo-badge">IDE</span>
     </div>
 
-    <div class="container">
-        <div class="editor-panel">
-            <div class="toolbar">
-                <button class="btn" onclick="runCode()">▶ Run</button>
-                <button class="btn" onclick="clearOutput()">Clear</button>
-                <button class="btn" onclick="loadExample('hello')">Hello</button>
-                <button class="btn" onclick="loadExample('api')">API</button>
-                <button class="btn" onclick="loadExample('ai')">AI</button>
-            </div>
-            <div id="editor"></div>
-            <div class="status-bar">
-                <span id="status">Ready</span>
-            </div>
+    <!-- IDE Menu Bar -->
+    <div class="ide-menu-bar">
+      <!-- File Menu -->
+      <div class="menu-item" data-menu="file">
+        <button class="menu-trigger" onclick="toggleMenu('file', event)">File</button>
+        <div class="menu-dropdown hidden" id="menu-file">
+          <div class="menu-action" onclick="promptCreateFile()">
+            <span>New File...</span> <span class="menu-kbd">Alt+N</span>
+          </div>
+          <div class="menu-action" onclick="saveActiveTab()">
+            <span>Save File</span> <span class="menu-kbd">Cmd+S</span>
+          </div>
+          <div class="menu-action" onclick="saveAllTabs()">
+            <span>Save All</span> <span class="menu-kbd">Cmd+Alt+S</span>
+          </div>
+          <div class="menu-sep"></div>
+          <div class="menu-action" onclick="downloadProject('react')">
+            <span>Download Web Project (Zip)</span>
+          </div>
+          <div class="menu-action" onclick="downloadProject('flutter')">
+            <span>Export Flutter Package</span>
+          </div>
+          <div class="menu-sep"></div>
+          <div class="menu-action" onclick="resetWorkspacePrompt()">
+            <span>Reset Workspace</span>
+          </div>
         </div>
+      </div>
 
-        <div class="output-panel">
-            <div class="toolbar">
-                <h3 style="color: #fff; margin: 0;">Output</h3>
-            </div>
-            <div class="output" id="output">
-                <div class="log">MCN Playground Ready</div>
-            </div>
+      <!-- Edit Menu -->
+      <div class="menu-item" data-menu="edit">
+        <button class="menu-trigger" onclick="toggleMenu('edit', event)">Edit</button>
+        <div class="menu-dropdown hidden" id="menu-edit">
+          <div class="menu-action" onclick="formatActiveFile()">
+            <span>Format Code</span> <span class="menu-kbd">Ctrl+Alt+F</span>
+          </div>
+          <div class="menu-action" onclick="checkActiveFile()">
+            <span>Verify Syntax &amp; Types</span> <span class="menu-kbd">F8</span>
+          </div>
+          <div class="menu-action" onclick="autoFixWithAI()">
+            <span>Auto-Fix with AI Copilot</span>
+          </div>
+          <div class="menu-sep"></div>
+          <div class="menu-action" onclick="clearOutputLog()">
+            <span>Clear Terminal Output</span>
+          </div>
+          <div class="menu-action" onclick="executeReplCommand('clear')">
+            <span>Clear REPL Console</span>
+          </div>
+          <div class="menu-action" onclick="executeReplCommand('reset')">
+            <span>Reset REPL State</span>
+          </div>
         </div>
+      </div>
+
+      <!-- View Menu -->
+      <div class="menu-item" data-menu="view">
+        <button class="menu-trigger" onclick="toggleMenu('view', event)">View</button>
+        <div class="menu-dropdown hidden" id="menu-view">
+          <div class="menu-action" onclick="toggleRightPanel()">
+            <span id="menu-toggle-panel-label">Toggle Right Panel</span> <span class="menu-kbd">Cmd+B</span>
+          </div>
+          <div class="menu-sep"></div>
+          <div class="menu-action" onclick="switchPanel('preview')">
+            <span>Web Preview</span>
+          </div>
+          <div class="menu-action" onclick="switchPanel('flutter-preview')">
+            <span>Mobile Simulator</span>
+          </div>
+          <div class="menu-action" onclick="switchPanel('repl-console')">
+            <span>REPL Sandbox</span>
+          </div>
+          <div class="menu-action" onclick="switchPanel('db-explorer')">
+            <span>Database Explorer</span>
+          </div>
+          <div class="menu-action" onclick="switchPanel('iot-simulator')">
+            <span>IoT Device Simulator</span>
+          </div>
+          <div class="menu-action" onclick="switchPanel('ai-inspector')">
+            <span>AI &amp; RAG Inspector</span>
+          </div>
+          <div class="menu-action" onclick="switchPanel('output')">
+            <span>Terminal Output</span>
+          </div>
+          <div class="menu-action" onclick="switchPanel('files')">
+            <span>Build Artifacts</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Build Menu -->
+      <div class="menu-item" data-menu="build">
+        <button class="menu-trigger" onclick="toggleMenu('build', event)">Build</button>
+        <div class="menu-dropdown hidden" id="menu-build">
+          <div class="menu-action" id="menu-build-run" onclick="runActiveFile()">
+            <span id="menu-build-run-text">Run Backend API</span> <span class="menu-kbd">Ctrl+Enter</span>
+          </div>
+          <div class="menu-action" id="menu-build-preview" onclick="buildAndLaunchPreview()">
+            <span id="menu-build-preview-text">Build UI &amp; Launch Preview</span> <span class="menu-kbd">Cmd+R</span>
+          </div>
+          <div class="menu-action" id="menu-build-verify" onclick="checkActiveFile()">
+            <span id="menu-build-verify-text">Run Static Verification</span>
+          </div>
+          <div class="menu-action" onclick="openDeployModal()">
+            <span>Deploy (Vercel, Docker)…</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Templates Menu -->
+      <div class="menu-item templates-dropdown-wrap" data-menu="templates">
+        <button class="menu-trigger" onclick="toggleMenu('templates', event)" id="btn-templates-menu">
+          Templates <span style="font-size:9px;opacity:0.7;margin-left:2px;">▾</span>
+        </button>
+        <div class="menu-dropdown templates-menu-popover hidden" id="templates-menu-popover">
+          <!-- Populated dynamically by loadExamples -->
+        </div>
+      </div>
+
+      <!-- Tools Menu -->
+      <div class="menu-item" data-menu="tools">
+        <button class="menu-trigger" onclick="toggleMenu('tools', event)">Tools</button>
+        <div class="menu-dropdown hidden" id="menu-tools">
+          <div class="menu-action" onclick="openAgentStudioModal()">
+            <span>AI Copilot Studio</span>
+          </div>
+          <div class="menu-action" onclick="openGenerateModal()">
+            <span>Generate App from Prompt</span>
+          </div>
+          <div class="menu-action" onclick="openBackendAgentModal()">
+            <span>AI Backend Agent</span>
+          </div>
+          <div class="menu-sep"></div>
+          <div class="menu-action" onclick="openSwaggerDocs()">
+            <span>API Docs (Swagger UI)</span>
+          </div>
+          <div class="menu-action" onclick="openDatabaseMigrationsModal()">
+            <span>Export SQL Migrations (Postgres / Supabase)</span>
+          </div>
+          <div class="menu-action" onclick="showVsCodeExtensionModal()">
+            <span>VS Code Extension</span>
+          </div>
+          <div class="menu-sep"></div>
+          <div class="menu-action" onclick="openSIModal()">
+            <span>Wire a Process (Wizard)</span>
+          </div>
+          <div class="menu-action" onclick="switchPanel('db-explorer')">
+            <span>Database SQL Console</span>
+          </div>
+          <div class="menu-action" onclick="switchPanel('iot-simulator')">
+            <span>IoT Device Monitor</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Help Menu -->
+      <div class="menu-item" data-menu="help">
+        <button class="menu-trigger" onclick="toggleMenu('help', event)">Help</button>
+        <div class="menu-dropdown hidden" id="menu-help">
+          <div class="menu-action" onclick="openDocumentation()">
+            <span>Documentation</span>
+          </div>
+          <div class="menu-action" onclick="showKeyboardShortcutsModal()">
+            <span>Keyboard Shortcuts</span> <span class="menu-kbd">?</span>
+          </div>
+          <div class="menu-action" onclick="showAboutModal()">
+            <span>About MCN Studio</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. CENTER: Segmented Mode Switcher -->
+  <div class="nav-section nav-center">
+    <div class="mode-pills">
+      <button class="mode-pill active" id="pill-react" onclick="switchWorkspace('react')" title="Web Workspace">
+        Web
+      </button>
+      <button class="mode-pill" id="pill-flutter" onclick="switchWorkspace('flutter')" title="Mobile Workspace">
+        Mobile
+      </button>
+      <button class="mode-pill" id="pill-repl" onclick="switchWorkspace('repl')" title="MCN REPL Sandbox">
+        REPL
+      </button>
+    </div>
+  </div>
+
+  <!-- 3. RIGHT: Primary Actions, AI, Layout & Community -->
+  <div class="nav-section nav-right">
+    <!-- Primary Workflow Actions -->
+    <div class="nav-group">
+      <button class="btn btn-hero-run" id="btn-hero-run" onclick="runActiveFile()" title="Execute current script (Ctrl+Enter)">
+        <span id="hero-run-text">Run</span>
+      </button>
+      <button class="btn btn-hero-preview" id="btn-hero-preview" onclick="buildAndLaunchPreview()" title="Compile UI and launch live preview (Cmd+R)">
+        <span id="hero-preview-text">Preview</span>
+      </button>
+      <button class="btn btn-sm" onclick="checkActiveFile()" id="btn-verify" title="Verify syntax, AST, and types (F8)">
+        <span id="verify-label">Verify</span>
+      </button>
+      <button class="btn btn-sm" id="btn-format-nav" onclick="formatActiveFile()" title="Format active code (Ctrl+Alt+F)">
+        Format
+      </button>
     </div>
 
-    <script>
-        let editor;
+    <div class="nav-divider"></div>
 
-        require.config({ paths: { vs: 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.44.0/min/vs' }});
-        require(['vs/editor/editor.main'], function () {
-            monaco.languages.register({ id: 'mcn' });
-            monaco.languages.setMonarchTokensProvider('mcn', {
-                tokenizer: {
-                    root: [
-                        [/\b(var|if|else|for|while|function|try|catch|task|await|use|type)\b/, 'keyword'],
-                        [/\b(log|echo|trigger|query|ai|workflow)\b/, 'keyword.function'],
-                        [/".*?"/, 'string'],
-                        [/\d+/, 'number'],
-                        [/\/\/.*$/, 'comment'],
-                    ]
-                }
-            });
+    <!-- AI & Generation Tools -->
+    <div class="nav-group">
+      <button class="btn btn-coral-sm" onclick="openAgentStudioModal()" title="AI Copilot Studio & Code Generation">
+        <span>✨ Copilot</span>
+      </button>
+    </div>
 
-            editor = monaco.editor.create(document.getElementById('editor'), {
-                value: `// MCN Playground
-log "Hello MCN!"
-var name = "World"
-log "Hello " + name`,
-                language: 'mcn',
-                theme: 'vs-dark',
-                automaticLayout: true,
-                minimap: { enabled: false }
-            });
-        });
+    <div class="nav-divider"></div>
 
-        async function runCode() {
-            const code = editor.getValue();
-            clearOutput();
-            addOutput('Executing MCN code...', 'log');
+    <!-- Panel & Community Actions -->
+    <div class="nav-group">
+      <button class="btn btn-icon" id="btn-toggle-panel" onclick="toggleRightPanel()" title="Toggle Right Panel (Cmd+B)">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+          <line x1="15" y1="3" x2="15" y2="21"></line>
+        </svg>
+      </button>
 
-            try {
-                const response = await fetch('/api/execute', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ code })
-                });
+      <div id="community-area" style="display:flex; align-items:center; gap:4px;">
+        <button class="btn btn-icon" onclick="openFeedbackModal()" id="btn-feedback" title="Submit Feedback &amp; Bug Reports" aria-label="Submit Feedback">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+        </button>
+        <button class="btn btn-icon btn-community-icon" onclick="openCommunityModal('register')" id="btn-register" title="Community Hub &amp; Developer Registration" aria-label="Register Installation">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M22 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+        </button>
+        <button class="btn btn-icon badge-registered-icon" id="registered-badge" style="display:none;" onclick="openCommunityModal('register')" title="Registered Community Member (Click to manage)" aria-label="Registered Community Profile">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><polyline points="16 11 18 13 22 9"></polyline></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+</header>
 
-                const result = await response.json();
-                if (result.success) {
-                    result.output?.forEach(line => addOutput(line, 'log'));
-                    updateStatus('Success');
-                } else {
-                    addOutput(`Error: ${result.error}`, 'error');
-                    updateStatus('Error');
-                }
-            } catch (error) {
-                mockExecute(code);
-            }
-        }
+<!-- ── Workspace ───────────────────────────────────────────────────────── -->
+<div class="workspace">
 
-        function mockExecute(code) {
-            const lines = code.split('\n');
-            lines.forEach(line => {
-                line = line.trim();
-                if (line.startsWith('log ')) {
-                    const message = line.substring(4).replace(/"/g, '');
-                    addOutput(message, 'success');
-                } else if (line.startsWith('var ')) {
-                    const varName = line.split('=')[0].replace('var ', '').trim();
-                    addOutput(`${varName} declared`, 'log');
-                }
-            });
-            updateStatus('Mock execution complete');
-        }
+  <!-- Workspace Switcher (Far-Left Bar) -->
+  <div class="workspace-switcher">
+    <div class="switcher-items">
+      <button class="switcher-item active" id="ws-react" onclick="switchWorkspace('react')" title="Web Workspace">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18"></path><path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18z"></path></svg>
+        <span class="switcher-text">Web</span>
+      </button>
+      <button class="switcher-item" id="ws-flutter" onclick="switchWorkspace('flutter')" title="Mobile Workspace">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="2.5" width="12" height="19" rx="2.5"></rect><path d="M10.5 18.5h3"></path></svg>
+        <span class="switcher-text">App</span>
+      </button>
+      <button class="switcher-item" id="ws-repl" onclick="switchWorkspace('repl')" title="REPL Sandbox">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="19" height="16" rx="2"></rect><path d="M7 9.5l3 2.5-3 2.5"></path><path d="M12.5 15h4.5"></path></svg>
+        <span class="switcher-text">REPL</span>
+      </button>
+      <button class="switcher-item" id="ws-templates" onclick="openTemplateGallery()" title="Browse templates">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"></rect><rect x="14" y="3" width="7" height="7" rx="1.5"></rect><rect x="3" y="14" width="7" height="7" rx="1.5"></rect><rect x="14" y="14" width="7" height="7" rx="1.5"></rect></svg>
+        <span class="switcher-text">Templates</span>
+      </button>
+    </div>
+  </div>
 
-        function addOutput(message, type = 'log') {
-            const output = document.getElementById('output');
-            const div = document.createElement('div');
-            div.className = type;
-            div.textContent = message;
-            output.appendChild(div);
-            output.scrollTop = output.scrollHeight;
-        }
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <div class="project-root-trigger" onclick="toggleProjectRoot()" title="Collapse / Expand Project Root">
+        <span class="project-root-caret" id="project-root-caret">▼</span>
+        <span class="project-root-icon">📦</span>
+        <span class="project-root-title">workspace</span>
+      </div>
+      <div class="sidebar-header-actions">
+        <button class="sidebar-tool-btn" onclick="promptCreateFile()" title="New File (Alt+N)">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+        </button>
+        <button class="sidebar-tool-btn" onclick="toggleCollapseAllFolders()" title="Collapse / Expand All Folders" id="btn-collapse-all">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1="14" y1="10" x2="21" y2="3"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>
+        </button>
+        <button class="sidebar-tool-btn sidebar-reset-btn" onclick="resetWorkspacePrompt()" title="Reset Workspace to Clean Template">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path><polyline points="3 3 3 8 8 8"></polyline></svg>
+          <span>Reset</span>
+        </button>
+      </div>
+    </div>
+    <div class="sidebar-scroll" id="sidebar-scroll-container">
+      <div id="file-tree"></div>
+    </div>
+  </div>
 
-        function clearOutput() {
-            document.getElementById('output').innerHTML = '';
-        }
+  <!-- Editor Area -->
+  <div class="editor-area">
+    <div class="tab-bar" id="tab-bar"></div>
+    <div id="monaco-container" style="flex:1;overflow:hidden;display:flex;flex-direction:column;"></div>
 
-        function updateStatus(message) {
-            document.getElementById('status').textContent = message;
-        }
+    <!-- Floating Inline Diagnostic & AI Auto-Fix Banner -->
+    <div id="editor-diagnostic-banner" class="diagnostic-banner hidden">
+      <div class="diagnostic-info">
+        <span class="diagnostic-badge" id="diag-badge">SYNTAX ISSUE</span>
+        <span id="diag-msg" style="font-family:'JetBrains Mono',monospace; font-size:12px;">Line 8: Inconsistent dedent</span>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <button class="btn btn-coral-sm" onclick="autoFixWithAI()">Auto-Fix with AI Copilot</button>
+        <button class="btn btn-sm" onclick="dismissDiagnosticBanner()" style="padding:3px 8px; font-size:11px;">Dismiss</button>
+      </div>
+    </div>
 
-        function loadExample(type) {
-            const examples = {
-                hello: `log "Hello MCN!"
-var greeting = "Welcome"
-log greeting + " to MCN Playground"`,
-                api: `var response = trigger("https://api.github.com/users/octocat")
-log "User: " + response.data.name`,
-                ai: `var data = "Sales increased 25%"
-var analysis = ai("Analyze: " + data)
-log analysis`
-            };
-            editor.setValue(examples[type] || examples.hello);
-        }
-    </script>
+    <!-- Empty State / Starter Hub -->
+    <div class="no-file-open" id="no-file-msg">
+      <div class="starter-hero">
+        <h2>Build Full-Stack Apps in Seconds</h2>
+        <p>Open a template to see a working app, then change it. Every template runs, has tests, and builds to web and mobile.</p>
+      </div>
+
+      <div class="starter-grid" id="starter-grid">
+        <!-- Featured templates, filled in by renderStarterHub() -->
+      </div>
+
+      <div style="display:flex; gap: 12px; margin-top: 10px;">
+        <button class="btn btn-hero-run" onclick="openTemplateGallery()">Browse all templates</button>
+        <button class="btn btn-sm" onclick="openGenerateModal()">Generate an app with AI</button>
+        <button class="btn btn-sm" onclick="promptCreateFile()">+ Create Blank File</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Preview panel -->
+  <div class="preview-panel">
+    <div class="panel-tabs">
+      <div class="panel-tab active" data-panel="preview" id="tab-web-preview" onclick="switchPanel('preview', this)">Web Preview</div>
+      <div class="panel-tab" data-panel="flutter-preview" id="tab-mobile-preview" onclick="switchPanel('flutter-preview', this)">Mobile Simulator</div>
+      <div class="panel-tab" data-panel="repl-console" id="tab-repl-console" onclick="switchPanel('repl-console', this)">REPL Sandbox</div>
+      <div class="panel-tab" data-panel="db-explorer" id="tab-db-explorer" onclick="switchPanel('db-explorer', this)">DB Explorer</div>
+      <div class="panel-tab" data-panel="iot-simulator" id="tab-iot-simulator" onclick="switchPanel('iot-simulator', this)">IoT Simulator</div>
+      <div class="panel-tab" data-panel="ai-inspector" id="tab-ai-inspector" onclick="switchPanel('ai-inspector', this)">AI &amp; RAG</div>
+      <div class="panel-tab" data-panel="output" id="tab-output" onclick="switchPanel('output', this)">Terminal</div>
+      <div class="panel-tab" data-panel="files" id="tab-files" onclick="switchPanel('files', this)">Build Artifacts</div>
+      <div class="panel-tabs-toggle" onclick="toggleRightPanel()" title="Collapse Right Panel (Cmd+B)" style="margin-left:auto; display:flex; align-items:center; padding:0 12px; cursor:pointer; color:var(--muted); transition:color .12s;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="9 18 15 12 9 6"></polyline>
+        </svg>
+      </div>
+    </div>
+    <div class="panel-content">
+
+      <!-- Web Preview -->
+      <div class="panel-section active" id="panel-preview" style="flex-direction:column;height:100%;">
+        <div class="preview-toolbar" id="preview-toolbar" style="height:34px;background:#0d1117;border-bottom:1px solid rgba(255,255,255,0.08);display:flex;align-items:center;padding:0 10px;gap:8px;font-size:11px;flex-shrink:0;">
+          <div style="display:flex;align-items:center;gap:6px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:3px 8px;flex:1;overflow:hidden;">
+            <span style="width:7px;height:7px;border-radius:50%;background:#10b981;flex-shrink:0;" id="preview-status-dot"></span>
+            <span style="color:#94a3b8;font-family:'JetBrains Mono',monospace;font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" id="preview-address-bar">http://localhost:5174</span>
+          </div>
+          <button class="btn btn-sm" onclick="refreshPreview()" title="Refresh Preview Frame" style="padding:2px 7px;font-size:11px;">↺</button>
+          <button class="btn btn-sm" onclick="openPreviewFullscreen()" title="Open Preview in New Tab" style="padding:2px 7px;font-size:11px;">↗ New Tab</button>
+          <button class="btn btn-sm" id="btn-toggle-server" onclick="toggleDevServer()" title="Start / Stop Dev Server" style="padding:2px 8px;font-size:11px;">Stop</button>
+        </div>
+        <div class="preview-placeholder" id="preview-ph" style="flex:1;">
+          <div class="ph-icon" style="font-size:16px; font-weight:700; color:var(--accent); letter-spacing:0.05em;">[PREVIEW]</div>
+          <h3>Live Web Preview</h3>
+          <p>Click <b>Build &amp; Preview</b> above to compile and render your interactive React application.</p>
+          <button class="btn btn-hero-preview" onclick="buildAndLaunchPreview()" style="margin-top:8px;">Build &amp; Launch Now</button>
+        </div>
+        <iframe id="preview-iframe" class="hidden" style="flex:1;width:100%;border:none;background:#0B1120;" allow="same-origin scripts"></iframe>
+      </div>
+
+      <!-- Mobile Preview (Flutter Simulator) -->
+      <div class="panel-section" id="panel-flutter-preview" style="background:#080D1A;padding:10px 8px;align-items:center;justify-content:center;flex-direction:column;gap:8px;height:100%;overflow:hidden;box-sizing:border-box;">
+        <!-- Simulated smartphone frame -->
+        <div class="phone-frame" style="width:min(300px, 94%);max-height:calc(100% - 40px);aspect-ratio:9/18.5;background:#000;border:7px solid #1E2D4A;border-radius:36px;box-shadow:0 20px 50px rgba(0,0,0,0.6), 0 0 20px rgba(56,189,248,0.12);display:flex;flex-direction:column;overflow:hidden;position:relative;flex-shrink:1;">
+          <!-- Dynamic Island -->
+          <div style="position:absolute;top:8px;left:50%;transform:translateX(-50%);width:84px;height:20px;background:#000;border-radius:10px;z-index:30;display:flex;align-items:center;justify-content:space-between;padding:0 8px;">
+            <div style="width:7px;height:7px;border-radius:50%;background:#1E293B;"></div>
+            <div style="width:6px;height:6px;border-radius:50%;background:#0284C7;"></div>
+          </div>
+          <!-- Screen Content -->
+          <div class="phone-screen" style="flex:1;background:#0B132B;display:flex;flex-direction:column;overflow:hidden;font-family:'Plus Jakarta Sans',sans-serif;color:#F8FAFC;padding-top:30px;position:relative;">
+            <!-- Phone Status Bar -->
+            <div style="height:16px;padding:0 14px;display:flex;justify-content:space-between;align-items:center;font-size:9.5px;font-weight:700;color:#94A3B8;z-index:20;flex-shrink:0;">
+              <span>9:41</span>
+              <div style="display:flex;gap:4px;align-items:center;">
+                <span style="font-size:8.5px;">5G</span><span style="font-size:8.5px;">100%</span>
+              </div>
+            </div>
+            <!-- Mock Flutter App Bar -->
+            <div id="flutter-mock-appbar" style="background:linear-gradient(135deg, #0284C7, #38BDF8);color:#ffffff;height:40px;padding:0 12px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 2px 8px rgba(0,0,0,0.25);flex-shrink:0;">
+              <div style="display:flex;align-items:center;gap:6px;overflow:hidden;">
+                <span id="flutter-appbar-title" style="font-weight:700;font-size:12px;letter-spacing:-0.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">MCN Mobile Dashboard</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:6px;">
+                <span id="flutter-status-badge" style="font-size:9px;background:rgba(255,255,255,0.2);padding:2px 5px;border-radius:4px;font-weight:600;letter-spacing:0.04em;">FLUTTER 3.22</span>
+              </div>
+            </div>
+
+            <!-- Phone In-App Notification Toast Container -->
+            <div id="flutter-phone-toast" style="position:absolute;top:74px;left:10px;right:10px;background:rgba(15,23,42,0.95);backdrop-filter:blur(8px);border:1px solid rgba(56,189,248,0.4);border-radius:10px;padding:6px 10px;display:none;align-items:center;gap:8px;font-size:10.5px;color:#38bdf8;box-shadow:0 8px 24px rgba(0,0,0,0.5);z-index:40;">
+              <span id="flutter-phone-toast-text" style="flex:1;">Notification</span>
+            </div>
+
+            <!-- Mock Flutter Body Content -->
+            <div id="flutter-mock-content" style="flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px;background:#0B132B;">
+              <!-- Dynamically rendered -->
+            </div>
+
+            <!-- Sleek Flutter Material 3 Bottom Navigation Bar -->
+            <div id="flutter-mock-bottomnav" style="height:48px;background:#080E21;border-top:1px solid rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:space-around;padding:0 4px;flex-shrink:0;z-index:25;">
+              <div class="flutter-nav-btn active" id="fnav-home" onclick="setMobileRoute('home')" style="display:flex;flex-direction:column;align-items:center;gap:2px;cursor:pointer;padding:4px 8px;border-radius:8px;color:#38bdf8;transition:all .15s;">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>
+                <span style="font-size:9px;font-weight:700;">Home</span>
+              </div>
+              <div class="flutter-nav-btn" id="fnav-deals" onclick="setMobileRoute('deals')" style="display:flex;flex-direction:column;align-items:center;gap:2px;cursor:pointer;padding:4px 8px;border-radius:8px;color:#64748b;transition:all .15s;">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="5" rx="2"></rect><line x1="2" x2="22" y1="10" y2="10"></line></svg>
+                <span style="font-size:9px;font-weight:600;">Deals</span>
+              </div>
+              <div class="flutter-nav-btn" id="fnav-analytics" onclick="setMobileRoute('analytics')" style="display:flex;flex-direction:column;align-items:center;gap:2px;cursor:pointer;padding:4px 8px;border-radius:8px;color:#64748b;transition:all .15s;">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"></path><path d="m19 9-5 5-4-4-3 3"></path></svg>
+                <span style="font-size:9px;font-weight:600;">Analytics</span>
+              </div>
+              <div class="flutter-nav-btn" id="fnav-settings" onclick="setMobileRoute('settings')" style="display:flex;flex-direction:column;align-items:center;gap:2px;cursor:pointer;padding:4px 8px;border-radius:8px;color:#64748b;transition:all .15s;">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                <span style="font-size:9px;font-weight:600;">Settings</span>
+              </div>
+            </div>
+
+            <!-- Phone In-App Bottom Sheet / Modal Container -->
+            <div id="flutter-phone-modal-backdrop" onclick="closeMobileModal()" style="position:absolute;inset:0;background:rgba(0,0,0,0.65);backdrop-filter:blur(4px);z-index:50;display:none;opacity:0;transition:opacity .18s ease-in-out;"></div>
+            <div id="flutter-phone-modal-sheet" style="position:absolute;left:0;right:0;bottom:0;max-height:82%;background:#0f172a;border-top:1px solid rgba(56,189,248,0.3);border-radius:18px 18px 0 0;padding:14px;z-index:55;display:none;transform:translateY(100%);transition:transform .2s cubic-bezier(0.16, 1, 0.3, 1);overflow-y:auto;box-shadow:0 -10px 30px rgba(0,0,0,0.8);">
+              <div style="width:32px;height:4px;background:rgba(255,255,255,0.2);border-radius:2px;margin:0 auto 10px;"></div>
+              <div id="flutter-phone-modal-content"></div>
+            </div>
+          </div>
+        </div>
+        <!-- Export / Actions below frame -->
+        <div style="display:flex;gap:6px;width:min(300px, 94%);flex-shrink:0;">
+          <button class="btn btn-hero-run" onclick="downloadProject('flutter')" style="flex:1;padding:6px 0;font-size:11px;border-radius:8px;justify-content:center;">Export Flutter Package</button>
+          <button class="btn" onclick="triggerMobileHapticSync()" style="padding:6px 10px;font-size:11px;border-radius:8px;background:rgba(255,255,255,0.08);color:#fff;" title="Reload simulator">↺</button>
+        </div>
+      </div>
+
+      <!-- REPL Sandbox Console -->
+      <div class="panel-section" id="panel-repl-console" style="background:#1a1b26;flex-direction:column;">
+        <div style="height:34px;background:#13141c;border-bottom:1px solid #2e303e;display:flex;align-items:center;padding:0 12px;gap:8px;flex-shrink:0;">
+          <span style="font-size:11px;font-weight:700;color:#38bdf8;display:flex;align-items:center;gap:4px;">
+            Interactive MCN REPL
+          </span>
+          <span style="font-size:10px;color:#64748b;margin-left:auto;">Persistent Environment</span>
+          <button class="btn btn-sm" onclick="executeReplCommand('vars')" style="padding:2px 7px;font-size:10.5px;" title="List defined variables">Vars</button>
+          <button class="btn btn-sm" onclick="executeReplCommand('help')" style="padding:2px 7px;font-size:10.5px;" title="View REPL commands">Help</button>
+          <button class="btn btn-sm" onclick="executeReplCommand('clear')" style="padding:2px 7px;font-size:10.5px;" title="Clear console output">Clear</button>
+          <button class="btn btn-sm" onclick="executeReplCommand('reset')" style="padding:2px 7px;font-size:10.5px;color:#f87171;" title="Reset variable state">Reset</button>
+        </div>
+        <div id="repl-history" style="flex:1;overflow-y:auto;padding:12px;font-family:'JetBrains Mono', monospace;font-size:11.5px;color:#c0caf5;display:flex;flex-direction:column;gap:6px;line-height:1.6;">
+          <div style="color:#565f89;">// Welcome to the MCN REPL Sandbox. Type expressions or statements below (e.g. var x = 42, log(x * 2)).</div>
+        </div>
+        <div style="height:36px;border-top:1px solid #2e303e;display:flex;align-items:center;padding:0 8px;gap:6px;background:#13141c;flex-shrink:0;">
+          <span style="color:#89ddff;font-family:'JetBrains Mono', monospace;font-weight:bold;">mcn&gt;</span>
+          <div id="repl-input" style="flex:1;height:100%;background:transparent;"></div>
+        </div>
+      </div>
+
+      <!-- Output log -->
+      <div class="panel-section" id="panel-output">
+        <div id="output-log"></div>
+      </div>
+
+      <!-- Build files -->
+      <div class="panel-section" id="panel-files">
+        <div class="build-files-list" id="build-files-list">
+          <div style="padding:24px;text-align:center;color:var(--muted)">No build yet — click Build</div>
+        </div>
+      </div>
+
+      <!-- DB Explorer Panel -->
+      <div class="panel-section" id="panel-db-explorer" style="padding:16px;flex-direction:column;gap:12px;overflow-y:auto;background:var(--surface);">
+        <div class="form-group" style="display:flex;gap:6px;align-items:center;">
+          <h4 style="font-size:12.5px;font-weight:600;color:var(--text);margin:0;">Tables & Schema</h4>
+          <button class="btn btn-sm" onclick="refreshDBTables()" style="margin-left:auto;padding:3px 8px;font-size:11px;">↻ Refresh</button>
+        </div>
+        <div id="db-tables-list" style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px;max-height:130px;overflow-y:auto;font-size:11.5px;color:var(--muted);display:flex;flex-direction:column;gap:6px;">
+          <div style="text-align:center;font-style:italic;">No tables found. Run database code first.</div>
+        </div>
+        
+        <div class="form-group" style="display:flex;flex-direction:column;gap:4px;">
+          <label style="font-size:11px;font-weight:600;color:var(--muted)">SQL Console</label>
+          <textarea id="db-sql-console" rows="3" class="form-textarea" placeholder="SELECT * FROM auth_users;" style="background:#1a1b26;color:#c0caf5;font-family:'JetBrains Mono',monospace;font-size:11.5px;border:1px solid var(--border);padding:8px;outline:none;border-radius:6px;resize:vertical;"></textarea>
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-primary btn-sm" onclick="runConsoleSQL()" style="padding:4px 12px;font-size:11.5px;">Execute Query</button>
+          <button class="btn btn-sm" onclick="document.getElementById('db-sql-console').value=''" style="padding:4px 12px;font-size:11.5px;">Clear</button>
+        </div>
+        
+        <div class="form-group" style="flex:1;display:flex;flex-direction:column;gap:4px;min-height:160px;">
+          <label style="font-size:11px;font-weight:600;color:var(--muted)">Query Results</label>
+          <div id="db-query-results" style="flex:1;background:#1a1b26;border:1px solid var(--border);border-radius:6px;padding:10px;overflow:auto;font-family:'JetBrains Mono',monospace;font-size:11px;color:#c0caf5;line-height:1.5;">
+            <div style="color:#565f89;font-style:italic;">Execute a query above to see results.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- IoT Simulator Panel -->
+      <div class="panel-section" id="panel-iot-simulator" style="padding:16px;flex-direction:column;gap:12px;overflow-y:auto;background:var(--surface);">
+        <div class="form-group" style="display:flex;gap:6px;align-items:center;">
+          <h4 style="font-size:12.5px;font-weight:600;color:var(--text);margin:0;">Devices</h4>
+          <span id="iot-live" style="font-size:10.5px;color:var(--muted);">● live</span>
+          <button class="btn btn-sm" onclick="refreshIoTSimulator()" style="margin-left:auto;padding:3px 8px;font-size:11px;">↻ Refresh</button>
+        </div>
+        <p style="margin:0;font-size:11px;color:var(--muted);line-height:1.5;">Every device is simulated here. Move a sensor to test your code, or flip an output. On a Raspberry Pi or with an Arduino plugged in, the same code drives real hardware.</p>
+        <div id="iot-devices-list" style="display:flex;flex-direction:column;gap:10px;">
+          <div style="text-align:center;font-style:italic;color:var(--muted);padding:16px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;font-size:12px;">No devices yet. Register one with device("register", ...) and press Run.</div>
+        </div>
+
+        <div class="form-group" style="flex:1;display:flex;flex-direction:column;gap:4px;min-height:140px;">
+          <label style="font-size:11px;font-weight:600;color:var(--muted)">Commands log</label>
+          <div id="iot-actions-log" style="flex:1;background:#1a1b26;border:1px solid var(--border);border-radius:6px;padding:10px;overflow-y:auto;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#c0caf5;line-height:1.5;">
+            <div style="color:#565f89;font-style:italic;">No commands recorded.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- AI & RAG Inspector Panel -->
+      <div class="panel-section" id="panel-ai-inspector" style="padding:16px;flex-direction:column;gap:12px;overflow-y:auto;background:var(--surface);">
+        <div class="form-group" style="display:flex;gap:6px;align-items:center;">
+          <h4 style="font-size:12.5px;font-weight:600;color:var(--text);margin:0;">Model Registry & AI Logs</h4>
+          <button class="btn btn-sm" onclick="refreshAIInspector()" style="margin-left:auto;padding:3px 8px;font-size:11px;">↻ Refresh</button>
+        </div>
+        
+        <div class="form-group" style="display:flex;flex-direction:column;gap:4px;">
+          <label style="font-size:11px;font-weight:600;color:var(--muted)">Active AI Model</label>
+          <div id="ai-active-model" style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-size:12px;font-weight:500;color:#f3f4f6;font-family:'JetBrains Mono',monospace;">
+            gpt-3.5-turbo (default)
+          </div>
+        </div>
+
+        <div class="form-group" style="flex:1;display:flex;flex-direction:column;gap:4px;min-height:200px;">
+          <label style="font-size:11px;font-weight:600;color:var(--muted)">AI & RAG Execution Trace</label>
+          <div id="ai-execution-trace" style="flex:1;background:#1a1b26;border:1px solid var(--border);border-radius:6px;padding:10px;overflow-y:auto;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#c0caf5;line-height:1.5;display:flex;flex-direction:column;gap:8px;">
+            <div style="color:#565f89;font-style:italic;">No AI operations logged yet. Run AI or RAG code to trace execution.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="preview-actions">
+      <button class="btn btn-sm" onclick="refreshPreview()" title="Reload iframe">↻ Refresh</button>
+      <button class="btn btn-sm" onclick="openPreviewFullscreen()" title="Open preview in new tab">↗ Open Tab</button>
+      <div style="flex:1"></div>
+      <span id="server-badge">No dev server</span>
+    </div>
+  </div>
+</div>
+
+<!-- ── Status bar ───────────────────────────────────────────────────────── -->
+<div class="status-bar">
+  <div id="status-dot"></div>
+  <span id="status-text">Ready</span>
+  <span class="status-div">|</span>
+  <span id="status-ws" style="opacity:.7">~/.mcn/playground</span>
+  <div style="flex:1"></div>
+  <span id="status-srv" style="opacity:.7"></span>
+</div>
+
+<!-- ── SI Wizard Modal ─────────────────────────────────────────────────────────────────────────────────────── -->
+<div class="modal-overlay hidden" id="si-modal">
+  <div class="modal-card si-card">
+    <div class="copilot-hdr">
+      <div class="copilot-hdr-left">
+        <div class="copilot-hdr-icon">🔄</div>
+        <div>
+          <div class="copilot-hdr-title">Wire a Process Wizard</div>
+          <div class="copilot-hdr-sub">Step-by-step System Integration Designer — Connect APIs, databases, cron triggers &amp; AI workflows</div>
+        </div>
+      </div>
+      <div class="copilot-badge-pill">
+        <span class="copilot-badge-pulse"></span>
+        <span>MCN Automation Studio</span>
+      </div>
+    </div>
+    <div class="modal-body" style="gap:14px;">
+
+      <!-- Step tabs -->
+      <div class="si-steps">
+        <div class="si-step-tab active" id="si-tab-1"><span class="si-step-num">1</span> <span>1. Trigger Event</span></div>
+        <div class="si-step-tab"        id="si-tab-2"><span class="si-step-num">2</span> <span>2. Data Sources &amp; Tools</span></div>
+        <div class="si-step-tab"        id="si-tab-3"><span class="si-step-num">3</span> <span>3. Actions &amp; Automation</span></div>
+      </div>
+
+      <!-- Page 1: Trigger -->
+      <div class="si-page active" id="si-page-1">
+        <div class="form-label">What starts or triggers this process?</div>
+        <div class="si-trigger-grid">
+          <div class="si-trigger-card" data-trigger="webhook" onclick="siSelectTrigger(this)">
+            <div class="si-trigger-icon-box" style="color:var(--accent);">API</div>
+            <div>
+              <div class="si-trigger-label">Webhook / REST API</div>
+              <div class="si-trigger-desc">Triggered when external clients or webhooks send HTTP requests</div>
+            </div>
+          </div>
+          <div class="si-trigger-card" data-trigger="schedule" onclick="siSelectTrigger(this)">
+            <div class="si-trigger-icon-box" style="color:var(--amber);">⏰</div>
+            <div>
+              <div class="si-trigger-label">Scheduled Cron Job</div>
+              <div class="si-trigger-desc">Run periodically on automated hourly, daily, or custom cron intervals</div>
+            </div>
+          </div>
+          <div class="si-trigger-card" data-trigger="manual" onclick="siSelectTrigger(this)">
+            <div class="si-trigger-icon-box" style="color:var(--green);">⚡</div>
+            <div>
+              <div class="si-trigger-label">UI Button Action</div>
+              <div class="si-trigger-desc">User triggers the workflow by clicking a button in the Web / App interface</div>
+            </div>
+          </div>
+          <div class="si-trigger-card" data-trigger="event" onclick="siSelectTrigger(this)">
+            <div class="si-trigger-icon-box" style="color:var(--coral);">📨</div>
+            <div>
+              <div class="si-trigger-label">Message / Event Queue</div>
+              <div class="si-trigger-desc">Triggered by async message broker, Kafka, Redis, or internal queue</div>
+            </div>
+          </div>
+          <div class="si-trigger-card" data-trigger="cdc" onclick="siSelectTrigger(this)">
+            <div class="si-trigger-icon-box" style="color:#c084fc;">🗄️</div>
+            <div>
+              <div class="si-trigger-label">Database Change (CDC)</div>
+              <div class="si-trigger-desc">Triggered when a table record is inserted, updated, or deleted</div>
+            </div>
+          </div>
+          <div class="si-trigger-card" data-trigger="file" onclick="siSelectTrigger(this)">
+            <div class="si-trigger-icon-box" style="color:#38bdf8;">📁</div>
+            <div>
+              <div class="si-trigger-label">File / Document Ingestion</div>
+              <div class="si-trigger-desc">Triggered when a CSV, PDF, or data file is uploaded or synced</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-group" id="si-trigger-detail" style="display:none; margin-top:4px;">
+          <label class="form-label" id="si-trigger-detail-label">Trigger Configuration</label>
+          <input class="form-input" id="si-trigger-detail-input" placeholder="e.g. /api/v1/order-placed" />
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Describe what this integration does <span>(in plain English)</span></label>
+          <div class="copilot-prompt-card">
+            <div class="copilot-prompt-hdr">
+              <span>PROCESS OBJECTIVE &amp; BUSINESS LOGIC</span>
+              <button class="prompt-clear" onclick="document.getElementById('si-process-desc').value='';">Clear</button>
+            </div>
+            <textarea class="copilot-textarea" id="si-process-desc" rows="2"
+              placeholder="e.g. When a new customer order is received, validate inventory in Postgres, process payment via Stripe, and notify the support channel on Slack."></textarea>
+          </div>
+        </div>
+      </div>
+
+      <!-- Page 2: Data & Tools -->
+      <div class="si-page" id="si-page-2">
+        <div class="form-label">What data sources, databases, or third-party tools are required?</div>
+        <div class="si-chips-bar">
+          <div class="si-preset-chip" onclick="siAddQuickSource('database', 'PostgreSQL / Supabase')">+ PostgreSQL</div>
+          <div class="si-preset-chip" onclick="siAddQuickSource('api', 'Stripe Payment Gateway')">+ Stripe API</div>
+          <div class="si-preset-chip" onclick="siAddQuickSource('ai', 'Claude / GPT-4o Summarizer')">+ AI Agent</div>
+          <div class="si-preset-chip" onclick="siAddQuickSource('database', 'Redis Session Cache')">+ Redis Cache</div>
+          <div class="si-preset-chip" onclick="siAddQuickSource('api', 'Slack Notifications Webhook')">+ Slack Webhook</div>
+          <div class="si-preset-chip" onclick="siAddQuickSource('file', 'Local JSON / CSV Store')">+ File Store</div>
+        </div>
+        <div id="si-sources-list" style="display:flex; flex-direction:column; gap:8px;"></div>
+        <button class="si-add-btn" onclick="siAddSource()">+ Add Custom Data Source</button>
+      </div>
+
+      <!-- Page 3: Actions -->
+      <div class="si-page" id="si-page-3">
+        <div class="form-label">What actions should be executed during this process?</div>
+        <div class="si-chips-bar">
+          <div class="si-preset-chip" onclick="siAddQuickAction('save_db', 'Persist record into database table')">+ Save to DB</div>
+          <div class="si-preset-chip" onclick="siAddQuickAction('call_api', 'Dispatch authenticated REST API request')">+ Call REST API</div>
+          <div class="si-preset-chip" onclick="siAddQuickAction('ai', 'Extract structured entities using AI')">+ AI Processing</div>
+          <div class="si-preset-chip" onclick="siAddQuickAction('slack', 'Send message to #alerts channel')">+ Slack Alert</div>
+          <div class="si-preset-chip" onclick="siAddQuickAction('notify', 'Return formatted JSON response')">+ Response</div>
+        </div>
+        <div id="si-actions-list" style="display:flex; flex-direction:column; gap:8px;"></div>
+        <button class="si-add-btn" onclick="siAddAction()">+ Add Custom Action</button>
+
+        <div class="form-group" style="margin-top:10px">
+          <label class="form-label">Claude API key <span>(optional if configured in environment)</span></label>
+          <input class="form-input" type="password" id="si-api-key" placeholder="sk-ant-..." autocomplete="off" />
+        </div>
+
+        <div id="si-error" style="display:none;color:#f87171;font-size:12.5px;padding:8px 12px;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;"></div>
+
+        <!-- Status & Live Stream -->
+        <div class="gen-status hidden" id="si-gen-status">
+          <div class="spinner"></div>
+          <span id="si-gen-status-text">Synthesizing MCN System Integration…</span>
+        </div>
+        <pre class="gen-stream hidden" id="si-gen-stream"></pre>
+
+        <!-- Post-Generation Status Card -->
+        <div class="copilot-success-card hidden" id="si-success-card">
+          <div class="copilot-success-hdr">
+            <div class="copilot-success-icon">✓</div>
+            <div>
+              <div class="copilot-success-title">Process Integration Generated Successfully!</div>
+              <div class="copilot-success-sub" id="si-success-summary">Scaffolded backend agents, integration contracts, and reactive UI controls.</div>
+            </div>
+          </div>
+          <div class="copilot-artifact-list">
+            <span class="copilot-artifact-badge">✓ backend/main.mcn</span>
+            <span class="copilot-artifact-badge">✓ ui/app.mcn</span>
+          </div>
+          <div class="copilot-success-actions">
+            <button class="btn btn-sm" onclick="closeSIModal(); openFile('backend/main.mcn')">📂 Open Backend</button>
+            <button class="btn btn-sm" onclick="closeSIModal(); openFile('ui/app.mcn')">⚛️ Open UI</button>
+            <button class="btn btn-hero-preview btn-sm" onclick="closeSIModal(); buildAndLaunchPreview()">⚡ Build &amp; Preview</button>
+            <button class="btn btn-primary btn-sm" onclick="closeSIModal()">Done</button>
+          </div>
+        </div>
+      </div>
+
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeSIModal()">Cancel</button>
+      <button class="btn" id="si-btn-back" onclick="siBack()" style="display:none">← Back</button>
+      <button class="btn btn-gradient" id="si-btn-next" onclick="siNext()">Next →</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Toast Notifications Container ───────────────────────────────────── -->
+<div id="toast-container"></div>
+
+<!-- ── Universal IDE Dialog Modal ──────────────────────────────────────── -->
+<div class="modal-overlay hidden" id="ide-dialog-modal">
+  <div class="dialog-card">
+    <div class="dialog-hdr">
+      <div class="dialog-icon-circle dialog-icon-info" id="ide-dialog-icon">ℹ</div>
+      <div class="dialog-title-wrap">
+        <div class="dialog-title" id="ide-dialog-title">Dialog Title</div>
+        <div class="dialog-sub" id="ide-dialog-sub">Dialog Subtitle</div>
+      </div>
+    </div>
+    <div class="dialog-body">
+      <div id="ide-dialog-message">Message text goes here...</div>
+      <div class="form-group hidden" id="ide-dialog-input-wrap">
+        <input class="form-input" type="text" id="ide-dialog-input" autocomplete="off" />
+        <div class="dialog-suggestions hidden" id="ide-dialog-suggestions"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" id="ide-dialog-cancel" onclick="closeIdeDialog(false)">Cancel</button>
+      <button class="btn btn-primary" id="ide-dialog-confirm" onclick="closeIdeDialog(true)">OK</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Generate Modal ──────────────────────────────────────────────────── -->
+<div class="modal-overlay hidden" id="gen-modal">
+  <div class="modal-card copilot-card">
+    <div class="copilot-hdr">
+      <div class="copilot-hdr-left">
+        <div class="copilot-hdr-icon">🚀</div>
+        <div>
+          <div class="copilot-hdr-title">AI Full-Stack Generator</div>
+          <div class="copilot-hdr-sub">Describe your full-stack app in natural language — generates MCN backend &amp; frontend</div>
+        </div>
+      </div>
+      <div class="copilot-badge-pill">
+        <span class="copilot-badge-pulse"></span>
+        <span>Dual AI Engine</span>
+      </div>
+    </div>
+    <div class="modal-body" style="gap:14px;">
+      
+      <!-- Starter presets -->
+      <div class="form-group">
+        <label class="form-label" style="margin-bottom:4px;">App Architecture Presets</label>
+        <div class="copilot-chips-grid">
+          <div class="copilot-chip-item" onclick="setGenPreset('Enterprise CRM dashboard with leads pipeline, contacts management, activity timeline, deals Kanban, and REST endpoints for each entity.')">
+            <span>💼</span> <span>Enterprise CRM &amp; Pipeline</span>
+          </div>
+          <div class="copilot-chip-item" onclick="setGenPreset('Real-time Crypto Portfolio Tracker with price alerts cron job, wallet balance cards, transaction history, and buy/sell modals.')">
+            <span>📈</span> <span>Crypto Portfolio Tracker</span>
+          </div>
+          <div class="copilot-chip-item" onclick="setGenPreset('E-Commerce Storefront with product catalog grid, category filters, shopping cart drawer, checkout modal, and inventory stock service.')">
+            <span>🛒</span> <span>E-Commerce &amp; Inventory</span>
+          </div>
+          <div class="copilot-chip-item" onclick="setGenPreset('Agile Kanban Board with sprint backlog, drag-and-drop task columns, team member badges, priority tags, and task detail drawer.')">
+            <span>📋</span> <span>Agile Project Kanban</span>
+          </div>
+          <div class="copilot-chip-item" onclick="setGenPreset('Full-stack AI Prompt & Workflow Marketplace where creators publish, test, fork, rate, and monetize prompts and multi-step AI pipelines with live AI playground and creator analytics.')">
+            <span>✨</span> <span>Prompt &amp; AI Marketplace</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Description input -->
+      <div class="form-group">
+        <label class="form-label">Full-Stack Application Specification</label>
+        <div class="copilot-prompt-card">
+          <div class="copilot-prompt-hdr">
+            <span>NATURAL LANGUAGE SPECIFICATION</span>
+            <button class="prompt-clear" onclick="document.getElementById('gen-desc').value=''; document.getElementById('gen-desc').focus();">Clear</button>
+          </div>
+          <textarea class="copilot-textarea" id="gen-desc" rows="3"
+            placeholder="e.g. A CRM with deals, contacts, companies, and activities. Sidebar navigation. CRUD for each section."></textarea>
+        </div>
+      </div>
+
+      <!-- Attachments Dropzone (PDFs, Flowcharts, Figma Designs, Docs) -->
+      <div class="form-group">
+        <label class="form-label" style="display:flex; justify-content:space-between; align-items:center;">
+          <span>Design &amp; Requirements Attachments <span style="color:var(--muted); font-weight:normal;">(BRDs, Flowcharts, Figma mockups, Schemas)</span></span>
+          <span id="gen-att-count" style="font-size:11px; color:var(--accent);"></span>
+        </label>
+        <input type="file" id="gen-file-input" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.svg,.md,.json,.txt" style="display:none;" onchange="handleGenFileSelect(this.files)" />
+        <div class="copilot-dropzone" id="gen-dropzone" onclick="document.getElementById('gen-file-input').click()">
+          <div class="copilot-dropzone-icon">📎</div>
+          <div class="copilot-dropzone-text">Drop PDF (BRD/PRD), Flowchart diagrams, or Figma UI mockups here, or <span style="color:var(--accent); text-decoration:underline;">browse files</span></div>
+          <div class="copilot-dropzone-sub">Supports PDF (PRD/BRD), PNG/JPG/WEBP/SVG (Figma &amp; Flowcharts), Markdown, JSON (up to 15MB each)</div>
+        </div>
+        <div class="copilot-attachments-list" id="gen-attachments-list"></div>
+      </div>
+
+      <!-- API Key input -->
+      <div class="form-group">
+        <label class="form-label">Claude API key <span>(optional if set via <code>mcn config set api_key</code>)</span></label>
+        <input class="form-input" type="password" id="gen-key" placeholder="sk-ant-..." autocomplete="off" />
+      </div>
+
+      <!-- Status & Streaming -->
+      <div class="gen-status hidden" id="gen-status">
+        <div class="spinner"></div>
+        <span id="gen-status-text">Connecting…</span>
+      </div>
+      <pre class="gen-stream hidden" id="gen-stream"></pre>
+
+      <!-- Post-Generation Status Card -->
+      <div class="copilot-success-card hidden" id="gen-success-card" style="margin-top:10px;">
+        <div class="copilot-success-hdr">
+          <div class="copilot-success-icon">🎉</div>
+          <div>
+            <div class="copilot-success-title">Full-Stack Application Generated!</div>
+            <div class="copilot-success-sub" id="gen-success-summary">Backend services, REST APIs, and multi-view UI are ready.</div>
+          </div>
+        </div>
+        <div class="copilot-artifact-list">
+          <span class="copilot-artifact-badge">✓ backend/main.mcn</span>
+          <span class="copilot-artifact-badge">✓ ui/app.mcn</span>
+        </div>
+        <div class="copilot-success-actions">
+          <button class="btn btn-sm" onclick="closeGenerateModal(); openFile('backend/main.mcn')">📂 Open Backend</button>
+          <button class="btn btn-sm" onclick="closeGenerateModal(); openFile('ui/app.mcn')">⚛️ Open UI</button>
+          <button class="btn btn-hero-preview btn-sm" onclick="closeGenerateModal(); buildAndLaunchPreview()">⚡ Build &amp; Preview</button>
+          <button class="btn btn-primary btn-sm" onclick="closeGenerateModal()">Done</button>
+        </div>
+      </div>
+
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeGenerateModal()">Cancel</button>
+      <button class="btn btn-gradient" id="gen-submit" onclick="submitGenerate()">🚀 Generate Full-Stack App</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── AI Agent Studio Modal ──────────────────────────────────────────── -->
+<div class="modal-overlay hidden" id="agent-studio-modal">
+  <div class="modal-card copilot-card">
+    <div class="copilot-hdr">
+      <div class="copilot-hdr-left">
+        <div class="copilot-hdr-icon">✨</div>
+        <div>
+          <div class="copilot-hdr-title">AI Copilot Studio</div>
+          <div class="copilot-hdr-sub">Prompt the AI Coding Agent to refine interfaces, components &amp; layouts</div>
+        </div>
+      </div>
+      <div class="copilot-badge-pill">
+        <span class="copilot-badge-pulse"></span>
+        <span>Claude AI</span>
+      </div>
+    </div>
+    <div class="modal-body" style="gap:14px;">
+      
+      <!-- Target Mode Segmented Switcher -->
+      <div class="form-group">
+        <label class="form-label" style="margin-bottom:4px;">Target Refinement Layer</label>
+        <div class="copilot-segmented">
+          <button type="button" class="copilot-seg-btn active" id="agent-mode-mcn" onclick="switchAgentMode('mcn')">
+            <span>🔷</span> <span>MCN Architecture (ui/app.mcn)</span>
+          </button>
+          <button type="button" class="copilot-seg-btn" id="agent-mode-compiled" onclick="switchAgentMode('compiled')">
+            <span>⚛️</span> <span>Compiled React TSX (frontend/src/App.tsx)</span>
+          </button>
+        </div>
+        <input type="hidden" id="agent-mode-val" value="mcn" />
+      </div>
+
+      <!-- Presets Grid -->
+      <div class="form-group">
+        <label class="form-label" style="margin-bottom:4px;">Design Intent Quick Presets</label>
+        <div class="copilot-chips-grid">
+          <div class="copilot-chip-item" onclick="setAgentPreset('mcn', 'Add Glassmorphism Theme (blur panels, translucent card borders, clean neon accent rings)')">
+            <span>✨</span> <span>Glassmorphic Layout</span>
+          </div>
+          <div class="copilot-chip-item" onclick="setAgentPreset('mcn', 'Convert main layout to a responsive 3-column dashboard grid layout (grid grid-cols-1 md:grid-cols-3 gap-6)')">
+            <span>📐</span> <span>3-Column Grid</span>
+          </div>
+          <div class="copilot-chip-item" onclick="setAgentPreset('compiled', 'Add hover scale-up micro-animations (scale 1.01, hover-scale) and smooth transition timings to all buttons and cards')">
+            <span>⚡</span> <span>Micro-Animations</span>
+          </div>
+          <div class="copilot-chip-item" onclick="setAgentPreset('compiled', 'Transform layout to luxury dark mode cyberpunk aesthetic with glowing borders and radial accent gradient backgrounds')">
+            <span>🌙</span> <span>Cyberpunk Aesthetic</span>
+          </div>
+          <div class="copilot-chip-item" onclick="setAgentPreset('mcn', 'Add KPI metric stat cards with percentage trend indicators, sparkline placeholders, and icon badges')">
+            <span>📊</span> <span>Metric Stat Cards</span>
+          </div>
+          <div class="copilot-chip-item" onclick="setAgentPreset('compiled', 'Add interactive form field focus rings, real-time validation badges, and floating toast notifications')">
+            <span>🛡️</span> <span>Interactive Form UX</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Prompt Input Card -->
+      <div class="form-group">
+        <label class="form-label">Instruction Prompt</label>
+        <div class="copilot-prompt-card">
+          <div class="copilot-prompt-hdr">
+            <span>COPILOT INSTRUCTIONS</span>
+            <button class="prompt-clear" onclick="document.getElementById('agent-prompt').value=''; document.getElementById('agent-prompt').focus();">Clear</button>
+          </div>
+          <textarea class="copilot-textarea" id="agent-prompt" rows="3"
+            placeholder="e.g. Add a dark-mode glassmorphic navbar with rounded stats cards, glowing borders, and hover transitions."></textarea>
+        </div>
+      </div>
+
+      <!-- API Key input -->
+      <div class="form-group">
+        <label class="form-label">Claude API key <span>(optional if configured in environment)</span></label>
+        <input class="form-input" type="password" id="agent-key" placeholder="sk-ant-..." autocomplete="off" />
+      </div>
+
+      <!-- Status and pipeline -->
+      <div class="gen-status hidden" id="agent-status" style="margin-top:4px;">
+        <div class="spinner"></div>
+        <span id="agent-status-text">Coding Agent analyzing UI...</span>
+      </div>
+
+      <!-- Post-Generation Status Card -->
+      <div class="copilot-success-card hidden" id="agent-success-card" style="margin-top:10px;">
+        <div class="copilot-success-hdr">
+          <div class="copilot-success-icon">✨</div>
+          <div>
+            <div class="copilot-success-title">UI Refined Successfully!</div>
+            <div class="copilot-success-sub" id="agent-success-summary">Applied refinements to interface components and styling.</div>
+          </div>
+        </div>
+        <div class="copilot-artifact-list">
+          <span class="copilot-artifact-badge" id="agent-success-badge">✓ ui/app.mcn</span>
+        </div>
+        <div class="copilot-success-actions">
+          <button class="btn btn-sm" id="btn-agent-open-file" onclick="closeAgentStudioModal(); openFile(_agentSuccessTarget || 'ui/app.mcn')">📂 View in Editor</button>
+          <button class="btn btn-hero-preview btn-sm" onclick="closeAgentStudioModal(); buildAndLaunchPreview()">⚡ Launch Preview (Cmd+R)</button>
+          <button class="btn btn-primary btn-sm" onclick="closeAgentStudioModal()">Done</button>
+        </div>
+      </div>
+
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeAgentStudioModal()">Cancel</button>
+      <button class="btn btn-gradient" id="agent-submit" onclick="submitAgentEnhance()">✨ Refine Interface</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Backend Agent Modal ────────────────────────────────────────────── -->
+<div class="modal-overlay hidden" id="backend-agent-modal">
+  <div class="modal-card copilot-card">
+    <div class="copilot-hdr">
+      <div class="copilot-hdr-left">
+        <div class="copilot-hdr-icon">⚡</div>
+        <div>
+          <div class="copilot-hdr-title">AI Backend Agent</div>
+          <div class="copilot-hdr-sub">Generate or extend MCN backend services, REST APIs, databases &amp; jobs</div>
+        </div>
+      </div>
+      <div class="copilot-badge-pill">
+        <span class="copilot-badge-pulse"></span>
+        <span>Autonomous Engine</span>
+      </div>
+    </div>
+    <div class="modal-body" style="gap:14px;">
+
+      <!-- Mode selection -->
+      <div class="form-group">
+        <label class="form-label" style="margin-bottom:4px;">Backend Operation Target</label>
+        <div class="copilot-segmented">
+          <button type="button" class="copilot-seg-btn active" id="backend-mode-enhance" onclick="switchBackendMode('backend')">
+            <span>⚡</span> <span>Enhance Active Backend (backend/main.mcn)</span>
+          </button>
+          <button type="button" class="copilot-seg-btn" id="backend-mode-scratch" onclick="switchBackendMode('generate_backend')">
+            <span>🚀</span> <span>Generate New Backend from Scratch</span>
+          </button>
+        </div>
+        <input type="hidden" id="backend-mode-val" value="backend" />
+      </div>
+
+      <!-- Presets -->
+      <div class="form-group">
+        <label class="form-label" style="margin-bottom:4px;">Backend Intent Presets</label>
+        <div class="copilot-chips-grid">
+          <div class="copilot-chip-item" onclick="setBackendPreset('backend', 'Add JWT authentication endpoints: POST /auth/login, POST /auth/register, POST /auth/refresh with proper token validation')">
+            <span>🔐</span> <span>JWT Auth Endpoints</span>
+          </div>
+          <div class="copilot-chip-item" onclick="setBackendPreset('backend', 'Add full CRUD REST endpoints (GET list, GET by id, POST create, PUT update, DELETE) for the main database table')">
+            <span>📦</span> <span>Full CRUD REST API</span>
+          </div>
+          <div class="copilot-chip-item" onclick="setBackendPreset('backend', 'Add a cron scheduled job that runs every midnight to clean up expired records and log a summary')">
+            <span>⏰</span> <span>Midnight Cron Job</span>
+          </div>
+          <div class="copilot-chip-item" onclick="setBackendPreset('backend', 'Add input validation and proper error handling (400/404/500) to all existing endpoints')">
+            <span>🛡️</span> <span>Validation &amp; Errors</span>
+          </div>
+          <div class="copilot-chip-item" onclick="setBackendPreset('backend', 'Add role-based access control: admin and user roles, protect write endpoints to admin only')">
+            <span>👥</span> <span>RBAC Permissions</span>
+          </div>
+          <div class="copilot-chip-item" onclick="setBackendPreset('generate_backend', 'Generate a complete REST API backend with CRUD endpoints, database tables, auth, and a health-check endpoint')">
+            <span>🌐</span> <span>Full Backend Scaffold</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Prompt input -->
+      <div class="form-group">
+        <label class="form-label">Backend Agent Instructions</label>
+        <div class="copilot-prompt-card">
+          <div class="copilot-prompt-hdr">
+            <span>BACKEND ARCHITECTURE PROMPT</span>
+            <button class="prompt-clear" onclick="document.getElementById('backend-prompt').value=''; document.getElementById('backend-prompt').focus();">Clear</button>
+          </div>
+          <textarea class="copilot-textarea" id="backend-prompt" rows="3"
+            placeholder="e.g. Add a products service with full CRUD, image upload endpoint, and a stock alert cron job."></textarea>
+        </div>
+      </div>
+
+      <!-- API Key input -->
+      <div class="form-group">
+        <label class="form-label">Claude API key <span>(optional if configured in environment)</span></label>
+        <input class="form-input" type="password" id="backend-key" placeholder="sk-ant-..." autocomplete="off" />
+      </div>
+
+      <!-- Status spinner -->
+      <div class="gen-status hidden" id="backend-status" style="margin-top:4px;">
+        <div class="spinner"></div>
+        <span id="backend-status-text">Backend Agent generating code…</span>
+      </div>
+
+      <!-- Post-Generation Status Card -->
+      <div class="copilot-success-card hidden" id="backend-success-card" style="margin-top:10px;">
+        <div class="copilot-success-hdr">
+          <div class="copilot-success-icon">⚡</div>
+          <div>
+            <div class="copilot-success-title">Backend Architecture Generated!</div>
+            <div class="copilot-success-sub" id="backend-success-summary">Generated database tables, contracts, and REST endpoints.</div>
+          </div>
+        </div>
+        <div class="copilot-artifact-list">
+          <span class="copilot-artifact-badge">✓ backend/main.mcn</span>
+        </div>
+        <div class="copilot-success-actions">
+          <button class="btn btn-sm" onclick="closeBackendAgentModal(); openFile('backend/main.mcn')">📂 View in Editor</button>
+          <button class="btn btn-hero-run btn-sm" onclick="closeBackendAgentModal(); runActiveFile()">▶ Run Backend API</button>
+          <button class="btn btn-primary btn-sm" onclick="closeBackendAgentModal()">Done</button>
+        </div>
+      </div>
+
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeBackendAgentModal()">Cancel</button>
+      <button class="btn btn-gradient" id="backend-submit" onclick="submitBackendAgent()">⚡ Apply Backend Logic</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Keyboard Shortcuts Modal ─────────────────────────────────────────── -->
+<div class="modal-overlay hidden" id="shortcuts-modal">
+  <div class="modal-card" style="width: 520px;">
+    <div class="modal-hdr">
+      <div class="modal-title">Keyboard Shortcuts</div>
+      <div class="modal-sub">Essential hotkeys in MCN Studio</div>
+    </div>
+    <div class="modal-body" style="gap:10px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:var(--surface2); border-radius:6px;">
+        <span style="font-weight:600;">Run Backend Script</span>
+        <span class="menu-kbd">Ctrl+Enter</span>
+      </div>
+      <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:var(--surface2); border-radius:6px;">
+        <span style="font-weight:600;">Save Active File</span>
+        <span class="menu-kbd">Cmd+S / Ctrl+S</span>
+      </div>
+      <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:var(--surface2); border-radius:6px;">
+        <span style="font-weight:600;">Format Code</span>
+        <span class="menu-kbd">Ctrl+Alt+F</span>
+      </div>
+      <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:var(--surface2); border-radius:6px;">
+        <span style="font-weight:600;">Toggle Right Panel</span>
+        <span class="menu-kbd">Cmd+B / Ctrl+B</span>
+      </div>
+      <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:var(--surface2); border-radius:6px;">
+        <span style="font-weight:600;">Create New File</span>
+        <span class="menu-kbd">Alt+N</span>
+      </div>
+      <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:var(--surface2); border-radius:6px;">
+        <span style="font-weight:600;">REPL History Up / Down</span>
+        <span class="menu-kbd">Up / Down Arrow</span>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary" onclick="closeShortcutsModal()">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── About Modal ──────────────────────────────────────────────────────── -->
+<div class="modal-overlay hidden" id="about-modal">
+  <div class="modal-card" style="width: 480px;">
+    <div class="modal-hdr">
+      <div class="modal-title">About MCN Studio</div>
+      <div class="modal-sub">Model Context Native Language IDE</div>
+    </div>
+    <div class="modal-body" style="gap:14px; text-align:center; padding:28px 24px;">
+      <div class="logo-gem" style="width:44px; height:44px; font-size:20px; margin:0 auto;">M</div>
+      <div>
+        <h3 style="font-size:17px; font-weight:800; color:var(--text);">MCN Studio IDE</h3>
+        <p style="font-size:12px; color:var(--coral); font-weight:700; margin-top:2px;">Coral Blue Edition</p>
+      </div>
+      <p style="font-size:12.5px; color:var(--muted); line-height:1.6; max-width:380px; margin:0 auto;">
+        The production-grade full-stack IDE for Model Context Native (MCN) development. Build backends, reactive web UIs, and Flutter mobile apps with native AI primitives.
+      </p>
+      <div style="display:flex; justify-content:center; gap:8px; margin-top:4px;">
+        <span class="ext-badge mcn">MCN</span>
+        <span class="ext-badge tsx">React</span>
+        <span class="ext-badge file">Flutter</span>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary" onclick="closeAboutModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Community Registration & Feedback Modal ──────────────────────────── -->
+<div class="modal-overlay hidden" id="community-modal">
+  <div class="modal-card" style="width:480px; max-width:92vw;">
+
+    <!-- Branded header -->
+    <div style="padding:24px 28px 0;">
+      <div style="display:flex; align-items:center; justify-content:space-between;">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <div style="width:34px;height:34px;background:var(--accent);border-radius:8px;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:16px;">M</div>
+          <div>
+            <div style="font-size:16px;font-weight:700;color:var(--text);" id="community-modal-title">Join MCN Community</div>
+            <div style="font-size:12px;color:var(--muted);" id="community-modal-sub">Register for updates, release notes & feedback</div>
+          </div>
+        </div>
+        <button onclick="closeCommunityModal()" style="border:none;background:none;cursor:pointer;color:var(--muted);font-size:20px;line-height:1;">&times;</button>
+      </div>
+
+      <!-- Tab switcher -->
+      <div style="display:flex; border-bottom:2px solid var(--border); margin-top:16px; gap:0;">
+        <button id="comm-tab-register" onclick="switchCommunityTab('register')"
+          style="flex:1;padding:10px 0;font-size:13px;font-weight:600;border:none;background:none;cursor:pointer;color:var(--accent);border-bottom:2px solid var(--accent);margin-bottom:-2px;transition:all .15s;">
+          Register Installation
+        </button>
+        <button id="comm-tab-feedback" onclick="switchCommunityTab('feedback')"
+          style="flex:1;padding:10px 0;font-size:13px;font-weight:600;border:none;background:none;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-2px;transition:all .15s;">
+          Submit Feedback / Bug
+        </button>
+      </div>
+    </div>
+
+    <!-- Tab 1: Registration Form -->
+    <div id="comm-body-register" style="padding:20px 28px 8px; display:flex; flex-direction:column; gap:12px;">
+      <div class="form-group">
+        <label class="form-label">Email address <span style="color:var(--accent);">*</span></label>
+        <input class="form-input" type="email" id="comm-reg-email" placeholder="you@company.com" style="padding:10px 12px;font-size:13.5px;" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Your Name</label>
+        <input class="form-input" type="text" id="comm-reg-name" placeholder="Alex Morgan" style="padding:10px 12px;font-size:13.5px;" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Organization / Team</label>
+        <input class="form-input" type="text" id="comm-reg-org" placeholder="Acme Engineering / Independent" style="padding:10px 12px;font-size:13.5px;" />
+      </div>
+      <div style="display:flex; align-items:center; gap:8px; margin-top:2px;">
+        <input type="checkbox" id="comm-reg-optin" style="cursor:pointer;" />
+        <label for="comm-reg-optin" style="font-size:12px;color:var(--muted);cursor:pointer;">Send me major MCN release updates and tutorials</label>
+      </div>
+      <div id="comm-reg-msg" style="display:none; font-size:13px; padding:8px 12px; border-radius:6px; line-height:1.4;"></div>
+      <div style="padding:12px 0 20px;">
+        <button class="btn btn-primary" id="btn-comm-reg-submit" onclick="submitCommunityRegistration()" style="width:100%; padding:11px; font-size:13.5px; font-weight:600; border-radius:8px;">
+          Register Installation
+        </button>
+      </div>
+    </div>
+
+    <!-- Tab 2: Feedback & Error Form -->
+    <div id="comm-body-feedback" style="display:none; padding:20px 28px 8px; flex-direction:column; gap:12px;">
+      <div class="form-group">
+        <label class="form-label">Feedback Type</label>
+        <select class="form-input" id="comm-feed-type" style="padding:9px 12px;font-size:13.5px;">
+          <option value="feedback">General Feedback / Idea</option>
+          <option value="bug">Bug Report / Error</option>
+          <option value="feature_request">Feature Request</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Subject</label>
+        <input class="form-input" type="text" id="comm-feed-subject" placeholder="Brief summary of feedback or issue" style="padding:10px 12px;font-size:13.5px;" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Message / Steps to Reproduce <span style="color:var(--accent);">*</span></label>
+        <textarea class="form-input" id="comm-feed-msg" rows="4" placeholder="Tell us what you loved, what broke, or what we should build next..." style="padding:10px 12px;font-size:13px;resize:vertical;"></textarea>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <input type="checkbox" id="comm-feed-logs" checked style="cursor:pointer;" />
+        <label for="comm-feed-logs" style="font-size:12px;color:var(--muted);cursor:pointer;">Include anonymized diagnostic terminal logs</label>
+      </div>
+      <div id="comm-feed-status" style="display:none; font-size:13px; padding:8px 12px; border-radius:6px; line-height:1.4;"></div>
+      <div style="padding:12px 0 20px;">
+        <button class="btn btn-primary" id="btn-comm-feed-submit" onclick="submitCommunityFeedback()" style="width:100%; padding:11px; font-size:13.5px; font-weight:600; border-radius:8px;">
+          Submit Feedback
+        </button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── Template Gallery ──────────────────────────────────────────────────── -->
+<div class="modal-overlay hidden" id="template-gallery" role="dialog" aria-modal="true" aria-labelledby="tg-title">
+  <div class="modal-card tg-card">
+    <div class="modal-hdr tg-hdr">
+      <div>
+        <div class="modal-title" id="tg-title">Start from a template</div>
+        <div class="modal-sub" id="tg-sub">Each one runs, has tests, and builds to a web and mobile app. Opening one replaces the files in Studio's workspace.</div>
+      </div>
+      <button class="tg-close" onclick="closeTemplateGallery()" aria-label="Close">✕</button>
+    </div>
+    <div class="tg-toolbar">
+      <input class="form-input tg-search" id="tg-search" type="search" placeholder="Search templates…" oninput="renderTemplateGallery()" aria-label="Search templates" />
+      <div class="tg-chips" id="tg-chips" role="tablist" aria-label="Categories"></div>
+    </div>
+    <div class="tg-grid" id="tg-grid"></div>
+  </div>
+</div>
+
+<!-- ── Deploy Modal ─────────────────────────────────────────────────────── -->
+<div class="modal-overlay hidden" id="deploy-modal">
+  <div class="modal-card">
+    <div class="modal-hdr">
+      <div class="modal-title">Deploy MCN App</div>
+      <div class="modal-sub">Put your app online with Vercel, or download a Docker-ready zip for any cloud</div>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">App name</label>
+        <input class="form-input" type="text" id="deploy-name" value="mcn-app" placeholder="my-app" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Target</label>
+        <select class="form-input" id="deploy-target" onchange="onDeployTargetChange()">
+          <option value="vercel">Vercel: web app + API, live URL</option>
+          <option value="zip">Zip only (download)</option>
+          <option value="docker">Zip + Docker command</option>
+        </select>
+      </div>
+      <div id="deploy-vercel-opts" style="display:flex;flex-direction:column;gap:8px;">
+        <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;cursor:pointer;">
+          <input type="checkbox" id="deploy-prod" /> Production (otherwise a preview URL)
+        </label>
+        <div style="font-size:11.5px;color:var(--fg-dim);line-height:1.5;">
+          Needs a <code>VERCEL_TOKEN</code> in <b>Secrets</b> (create one at vercel.com/account/tokens). Builds the React app from <code>ui/app.mcn</code> and runs <code>backend/</code> at <code>/api</code>. Settings like <code>ANTHROPIC_API_KEY</code> come from the project's <code>.env</code>.
+          SQLite data on Vercel is temporary; use PostgreSQL for data that must last.
+        </div>
+      </div>
+      <div class="gen-status hidden" id="deploy-status">
+        <div class="spinner"></div>
+        <span id="deploy-status-text">Building…</span>
+      </div>
+      <div class="hidden" id="deploy-vercel-result">
+        <div style="color:var(--green);font-weight:600;margin-bottom:8px;">✓ Your app is live</div>
+        <a id="deploy-vercel-url" href="#" target="_blank" rel="noopener" style="font-size:13px;word-break:break-all;"></a>
+        <div style="font-size:11.5px;color:var(--fg-dim);margin-top:6px;">The API is at the same address under <code>/api/&lt;endpoint&gt;</code>.</div>
+      </div>
+      <div class="hidden" id="deploy-result">
+        <div style="color:var(--green);font-weight:600;margin-bottom:8px;">✓ Deployment package ready!</div>
+        <div class="form-label">Run with Docker:</div>
+        <pre id="deploy-docker-cmd" style="background:var(--bg-deep);padding:10px;border-radius:6px;font-size:12px;overflow-x:auto;white-space:pre-wrap;word-break:break-all;margin-top:4px;"></pre>
+        <div class="form-label" style="margin-top:10px;">Files included:</div>
+        <div id="deploy-files" style="font-size:12px;color:var(--fg-dim);line-height:1.7;"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeDeployModal()">Close</button>
+      <button class="btn btn-primary" id="deploy-submit" onclick="submitDeploy()">Build &amp; Download</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Scripts ─────────────────────────────────────────────────────────── -->
+<!-- Scripts load in order and share one global scope -->
+<script src="/static/js/ui-kit.js"></script>
+<script src="/static/js/editor.js"></script>
+<script src="/static/js/workspace.js"></script>
+<script src="/static/js/build.js"></script>
+<script src="/static/js/tools.js"></script>
+<script src="/static/js/mobile-simulator.js"></script>
+<script src="/static/js/ai.js"></script>
+<script src="/static/js/community.js"></script>
+<script src="/static/js/si-wizard.js"></script>
 </body>
 </html>

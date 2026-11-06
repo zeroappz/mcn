@@ -1,0 +1,1771 @@
+"""
+MCN Parser — converts a token stream into a typed AST.
+
+Key improvements over v1:
+  - Produces proper dataclass nodes (ast_nodes.py) instead of raw dicts
+  - Uses INDENT / DEDENT tokens for block parsing — no heuristics, no
+    hardcoded function names, no brace-depth counting
+  - Every ParseError carries the offending token's line + col
+  - Proper lexical scope: function bodies are delimited by INDENT/DEDENT,
+    same as if/else/for/while/try/catch blocks
+"""
+from __future__ import annotations
+
+from typing import List, Optional
+
+from .lexer import Token, TT, KEYWORDS
+from . import ast_nodes as ast
+
+# Token types that may appear as unquoted object literal keys
+_KEYWORD_TYPES = frozenset(KEYWORDS.values())
+
+
+# ── Errors ─────────────────────────────────────────────────────────────────────
+
+class ParseError(Exception):
+    def __init__(self, message: str, token: Token, show_got: bool = True):
+        got = f" (got {token.type.name} {token.value!r})" if show_got else ""
+        super().__init__(f"[{token.line}:{token.col}] ParseError: {message}{got}")
+        self.token = token
+
+
+# ── Parser ─────────────────────────────────────────────────────────────────────
+
+# Built-in names that can be called in statement position without parentheses:
+#   log "hello"   →  log("hello")
+_STATEMENT_STYLE_BUILTINS = {
+    "log", "echo", "trigger", "query", "workflow", "ai",
+    "await", "env", "read_file", "write_file", "append_file", "fetch",
+    "device", "agent", "pipeline", "natural", "train", "predict", "preprocess", "translate"
+}
+
+
+# Keywords that start declarations (`agent Name`, `test "..."`) but are also
+# valid names: runtime functions like agent("create", ...), loop variables
+# like `for task in tasks`, or function names like `function test()`.
+_SOFT_KEYWORDS = {
+    TT.AGENT, TT.PIPELINE, TT.WORKFLOW, TT.SERVICE, TT.CONTRACT,
+    TT.PROMPT, TT.MCP, TT.COMPONENT, TT.APP, TT.TASK, TT.USE,
+    TT.STAGE, TT.ENDPOINT, TT.STEP, TT.PORT, TT.ON, TT.INCLUDE,
+    TT.ROUTE, TT.TEST, TT.ASSERT, TT.TOOL, TT.SCHEDULE, TT.STATE, TT.LAYOUT, TT.RENDER,
+}
+
+
+class Parser:
+    """
+    Recursive-descent parser.
+
+    Token stream rules assumed:
+      - Blank / comment-only lines produce no tokens at all.
+      - Each non-blank line ends with NEWLINE.
+      - Indentation changes produce INDENT before the first token of the deeper
+        block and DEDENT after the last token of that block.
+    """
+
+    def __init__(self, tokens: List[Token]):
+        self._tokens = tokens
+        self._pos    = 0
+
+    # ── Entry point ────────────────────────────────────────────────────────────
+
+    def parse(self) -> ast.Program:
+        tok  = self._current()
+        body: List[ast.Stmt] = []
+        self.errors: List[str] = []          # collected non-fatal parse errors
+        while not self._at_end():
+            self._skip_newlines()
+            if self._at_end():
+                break
+            try:
+                stmt = self._statement()
+                if stmt is not None:
+                    body.append(stmt)
+            except ParseError as e:
+                self.errors.append(str(e))
+                self._synchronize()          # skip to next safe statement boundary
+        return ast.Program(body=body, line=tok.line, col=tok.col)
+
+    def _synchronize(self) -> None:
+        """Advance past the current bad token(s) to the next top-level statement.
+
+        Strategy: consume tokens until we see a NEWLINE at indent depth 0, or
+        one of the statement-starting keywords.  This prevents a single syntax
+        error from cascading into dozens of confusing follow-on errors.
+        """
+        _STMT_STARTERS = {
+            TT.VAR, TT.FUNCTION, TT.IF, TT.FOR, TT.WHILE, TT.RETURN,
+            TT.TRY, TT.THROW, TT.USE, TT.PIPELINE, TT.SERVICE,
+            TT.WORKFLOW, TT.CONTRACT, TT.PROMPT, TT.AGENT, TT.MCP,
+            TT.TEST, TT.COMPONENT, TT.APP, TT.TASK,
+        }
+        depth = 0
+        while not self._at_end():
+            tok = self._current()
+            if tok.type == TT.INDENT:
+                depth += 1
+                self._advance()
+            elif tok.type == TT.DEDENT:
+                depth = max(0, depth - 1)
+                self._advance()
+                if depth == 0:
+                    return
+            elif tok.type == TT.NEWLINE:
+                self._advance()
+                if depth == 0:
+                    return
+            elif depth == 0 and tok.type in _STMT_STARTERS:
+                return
+            else:
+                self._advance()
+
+    # ── Statement dispatch ─────────────────────────────────────────────────────
+
+    def _statement(self) -> Optional[ast.Stmt]:
+        tok = self._current()
+        # Soft keyword used as a name: agent("create", ...), task = 1, pipeline.run()
+        if tok.type in _SOFT_KEYWORDS and self._pos + 1 < len(self._tokens):
+            nxt = self._tokens[self._pos + 1].type
+            # ...or a statement-style call: pipeline "create" "etl" (declarations take a bare name)
+            if nxt in (TT.LPAREN, TT.DOT, TT.LBRACKET, TT.ASSIGN) or \
+                    (nxt == TT.STRING and tok.value in _STATEMENT_STYLE_BUILTINS):
+                self._tokens[self._pos] = tok = Token(TT.IDENTIFIER, tok.value, tok.line, tok.col)
+        if tok.type == TT.VAR:      return self._var_decl()
+        if tok.type == TT.IF:       return self._if_stmt()
+        if tok.type == TT.FOR:      return self._for_stmt()
+        if tok.type == TT.WHILE:    return self._while_stmt()
+        if tok.type == TT.TRY:      return self._try_stmt()
+        if tok.type == TT.THROW:    return self._throw_stmt()
+        if tok.type == TT.TASK:     return self._task_stmt()
+        if tok.type == TT.USE:      return self._use_stmt()
+        if tok.type == TT.FUNCTION: return self._function_decl()
+        if tok.type == TT.RETURN:   return self._return_stmt()
+        # 2030 language primitives
+        if tok.type == TT.PIPELINE: return self._pipeline_decl()
+        if tok.type == TT.SERVICE:  return self._service_decl()
+        if tok.type == TT.WORKFLOW: return self._workflow_decl()
+        if tok.type == TT.CONTRACT: return self._contract_decl()
+        # Background Jobs
+        if tok.type == TT.SCHEDULE: return self._schedule_decl()
+        # AI / intelligent primitives
+        if tok.type == TT.PROMPT:   return self._prompt_decl()
+        if tok.type == TT.AGENT:    return self._agent_decl()
+        if tok.type == TT.MCP:      return self._mcp_decl()
+        # Loop control
+        if tok.type == TT.BREAK:    return self._break_stmt()
+        if tok.type == TT.CONTINUE: return self._continue_stmt()
+        # Test framework
+        if tok.type == TT.TEST:     return self._test_decl()
+        if tok.type == TT.ASSERT:   return self._assert_stmt()
+        # UI / Frontend primitives
+        if tok.type == TT.COMPONENT: return self._component_decl()
+        if tok.type == TT.APP:       return self._app_decl()
+        if tok.type == TT.INCLUDE:   return self._include_stmt()
+        if tok.type == TT.ON:        return self._on_statement()
+        # Bare assignment variants: name = expr, name += expr, name -= expr ...
+        _COMPOUND_OPS = {
+            TT.PLUS_ASSIGN: "+", TT.MINUS_ASSIGN: "-",
+            TT.STAR_ASSIGN: "*", TT.SLASH_ASSIGN: "/",
+            TT.PERCENT_ASSIGN: "%",
+        }
+        if (tok.type == TT.IDENTIFIER and
+                self._pos + 1 < len(self._tokens)):
+            next_tt = self._tokens[self._pos + 1].type
+            if next_tt == TT.ASSIGN:
+                return self._assign_stmt()
+            if next_tt in _COMPOUND_OPS:
+                return self._compound_assign_stmt(_COMPOUND_OPS[next_tt])
+        return self._expr_stmt()
+
+    # ── Statement parsers ──────────────────────────────────────────────────────
+
+    def _var_decl(self) -> ast.VarDecl:
+        tok   = self._advance()            # consume VAR
+        tok_n = self._current()
+        if tok_n.type == TT.IDENTIFIER or tok_n.type in _SOFT_KEYWORDS:
+            name_tok = self._advance()
+        else:
+            raise ParseError(f"Expected variable name after 'var' (got {tok_n.type.name} '{tok_n.value}')", tok_n)
+
+        # optional type hint: var x: int = 5
+        type_hint: Optional[str] = None
+        if self._match(TT.COLON):
+            tok_t = self._current()
+            if tok_t.type == TT.IDENTIFIER or tok_t.type in _KEYWORD_TYPES:
+                type_tok = self._advance()
+                type_hint = type_tok.value
+            else:
+                raise ParseError("Expected type name after ':'", tok_t)
+        self._consume(TT.ASSIGN, "Expected '=' after variable name")
+        value    = self._expression()
+        self._consume_end()
+        return ast.VarDecl(name=name_tok.value, value=value, type_hint=type_hint,
+                           line=tok.line, col=tok.col)
+
+    def _assign_stmt(self) -> ast.AssignStmt:
+        name_tok = self._advance()            # consume IDENTIFIER
+        self._advance()                       # consume ASSIGN '='
+        value    = self._expression()
+        self._consume_end()
+        return ast.AssignStmt(name=name_tok.value, value=value,
+                              line=name_tok.line, col=name_tok.col)
+
+    def _compound_assign_stmt(self, op: str) -> ast.CompoundAssignStmt:
+        """x += expr, x -= expr, x *= expr, x /= expr, x %= expr"""
+        name_tok = self._advance()   # consume IDENTIFIER
+        self._advance()              # consume +=/-=/etc.
+        value    = self._expression()
+        self._consume_end()
+        return ast.CompoundAssignStmt(name=name_tok.value, op=op, value=value,
+                                      line=name_tok.line, col=name_tok.col)
+
+    def _if_stmt(self) -> ast.IfStmt:
+        tok       = self._advance()           # consume IF
+        condition = self._expression()
+        self._match(TT.COLON)                 # optional trailing colon
+        self._consume_end()
+        then_body = self._block()
+        else_body: List[ast.Stmt] = []
+        if self._check(TT.ELSE):
+            self._advance()                   # consume ELSE
+            if self._check(TT.IF):
+                # else if → wrap the nested if as the else_body (one-item list)
+                else_body = [self._if_stmt()]
+            else:
+                self._match(TT.COLON)         # optional trailing colon
+                self._consume_end()
+                else_body = self._block()
+        return ast.IfStmt(condition=condition, then_body=then_body,
+                          else_body=else_body, line=tok.line, col=tok.col)
+
+    def _for_stmt(self) -> ast.ForStmt:
+        tok     = self._advance()             # consume FOR
+        first   = self._consume(TT.IDENTIFIER, "Expected loop variable after 'for'")
+
+        # for i, val in list  →  index_var=i, variable=val
+        index_var: Optional[str] = None
+        if self._check(TT.COMMA):
+            self._advance()                   # consume ','
+            second    = self._consume(TT.IDENTIFIER, "Expected value variable after ','")
+            index_var = first.value
+            var_name  = second.value
+        else:
+            var_name  = first.value
+
+        self._consume(TT.IN, "Expected 'in' after loop variable")
+        iterable = self._expression()
+        self._match(TT.COLON)                 # optional trailing colon
+        self._consume_end()
+        body = self._block()
+        return ast.ForStmt(variable=var_name, index_var=index_var,
+                           iterable=iterable, body=body,
+                           line=tok.line, col=tok.col)
+
+    def _while_stmt(self) -> ast.WhileStmt:
+        tok       = self._advance()           # consume WHILE
+        condition = self._expression()
+        self._match(TT.COLON)                 # optional trailing colon
+        self._consume_end()
+        body = self._block()
+        return ast.WhileStmt(condition=condition, body=body,
+                             line=tok.line, col=tok.col)
+
+    def _try_stmt(self) -> ast.TryStmt:
+        tok      = self._advance()            # consume TRY
+        self._consume_end()
+        try_body     = self._block()
+        catch_var:    Optional[str]   = None
+        catch_body:   List[ast.Stmt]  = []
+        finally_body: List[ast.Stmt]  = []
+
+        if self._check(TT.CATCH):
+            self._advance()                   # consume CATCH
+            # Optional binding: catch e  or  catch (e)
+            if self._check(TT.IDENTIFIER):
+                catch_var = self._advance().value
+            elif self._check(TT.LPAREN):
+                self._advance()               # consume (
+                catch_var = self._consume(TT.IDENTIFIER, "Expected variable name").value
+                self._consume(TT.RPAREN, "Expected ')' after catch variable")
+            self._consume_end()
+            catch_body = self._block()
+
+        if self._check(TT.FINALLY):
+            self._advance()                   # consume FINALLY
+            self._consume_end()
+            finally_body = self._block()
+
+        return ast.TryStmt(try_body=try_body, catch_var=catch_var,
+                           catch_body=catch_body, finally_body=finally_body,
+                           line=tok.line, col=tok.col)
+
+    def _throw_stmt(self) -> ast.ThrowStmt:
+        tok     = self._advance()             # consume THROW
+        message = self._expression()
+        self._consume_end()
+        return ast.ThrowStmt(message=message, line=tok.line, col=tok.col)
+
+    def _task_stmt(self) -> ast.TaskStmt:
+        tok  = self._advance()                # consume TASK
+        name = self._expression()
+        func = self._expression()
+        args: List[ast.Expr] = []
+        while not self._at_eol():
+            args.append(self._expression())
+        self._consume_end()
+        return ast.TaskStmt(name=name, function=func, arguments=args,
+                            line=tok.line, col=tok.col)
+
+    def _use_stmt(self) -> ast.UseStmt:
+        tok     = self._advance()             # consume USE
+        package = self._expression()
+        self._consume_end()
+        return ast.UseStmt(package=package, line=tok.line, col=tok.col)
+
+    def _parse_params(self) -> tuple:
+        """
+        Parse a parenthesised parameter list with optional type hints and defaults.
+        Caller must have already consumed the opening '('.
+        Returns (params: List[str], defaults: dict, param_types: dict).
+        Supports: foo(x: int, y: str = "hi")
+        """
+        params:      List[str] = []
+        defaults:    dict      = {}
+        param_types: dict      = {}
+
+        def _one_param():
+            tok_p = self._current()
+            if tok_p.type == TT.IDENTIFIER or tok_p.type in _KEYWORD_TYPES:
+                p = self._advance().value
+            else:
+                raise ParseError("Expected parameter name", tok_p)
+            params.append(p)
+            # optional type hint: param: type
+            if self._match(TT.COLON):
+                tok_t = self._current()
+                if tok_t.type == TT.IDENTIFIER or tok_t.type in _KEYWORD_TYPES:
+                    type_tok = self._advance()
+                else:
+                    raise ParseError("Expected type name after ':'", tok_t)
+                param_types[p] = type_tok.value
+            if self._match(TT.ASSIGN):
+                defaults[p] = self._expression()
+
+        if not self._check(TT.RPAREN):
+            _one_param()
+            while self._match(TT.COMMA):
+                _one_param()
+        return params, defaults, param_types
+
+    def _function_decl(self) -> ast.FunctionDecl:
+        tok      = self._advance()            # consume FUNCTION
+        name_tok = self._consume(TT.IDENTIFIER, "Expected function name")
+        self._consume(TT.LPAREN, "Expected '(' after function name")
+        params, defaults, param_types = self._parse_params()
+        self._consume(TT.RPAREN, "Expected ')' after parameters")
+        # optional return type: function foo(x): bool
+        return_type: Optional[str] = None
+        if self._match(TT.COLON):
+            rt = self._current()
+            if rt.type == TT.IDENTIFIER or rt.type in _KEYWORD_TYPES:
+                return_type = self._advance().value
+                self._match(TT.COLON)         # optional trailing colon after return type
+        self._consume_end()
+        body = self._block()
+        return ast.FunctionDecl(name=name_tok.value, params=params,
+                                defaults=defaults, body=body,
+                                param_types=param_types, return_type=return_type,
+                                line=tok.line, col=tok.col)
+
+    def _return_stmt(self) -> ast.ReturnStmt:
+        tok   = self._advance()               # consume RETURN
+        value: Optional[ast.Expr] = None
+        if not self._at_eol():
+            value = self._expression()
+        self._consume_end()
+        return ast.ReturnStmt(value=value, line=tok.line, col=tok.col)
+
+    def _expr_stmt(self) -> ast.ExprStmt:
+        tok = self._current()
+
+        # Statement-style built-in calls: log "msg", echo "msg", etc.
+        # If the identifier is immediately followed by '(' it's a normal function
+        # call (e.g. query("SQL", params)) so fall through to expression parsing.
+        next_is_paren = (self._pos + 1 < len(self._tokens) and
+                         self._tokens[self._pos + 1].type == TT.LPAREN)
+        if (tok.type == TT.IDENTIFIER and tok.value in _STATEMENT_STYLE_BUILTINS
+                and not next_is_paren):
+            func_tok = self._advance()
+            args: List[ast.Expr] = []
+            while not self._at_eol():
+                args.append(self._expression())
+                self._match(TT.COMMA)
+            self._consume_end()
+            callee = ast.Variable(name=func_tok.value,
+                                  line=func_tok.line, col=func_tok.col)
+            call   = ast.Call(callee=callee, arguments=args,
+                              line=func_tok.line, col=func_tok.col)
+            return ast.ExprStmt(expression=call, line=func_tok.line, col=func_tok.col)
+
+        expr = self._expression()
+
+        # Property/index assignment: obj.key = val  or  arr[i] = val
+        if self._check(TT.ASSIGN):
+            self._advance()           # consume '='
+            value = self._expression()
+            self._consume_end()
+            if isinstance(expr, ast.Property):
+                return ast.PropertyAssignStmt(
+                    object=expr.object, prop=expr.name, value=value,
+                    line=expr.line, col=expr.col)
+            if isinstance(expr, ast.Index):
+                return ast.IndexAssignStmt(
+                    object=expr.object, index=expr.index, value=value,
+                    line=expr.line, col=expr.col)
+            # Fall through — treat as error or re-wrap (shouldn't happen after
+            # the IDENTIFIER fast-path above handled simple name = val)
+
+        self._consume_end()
+        return ast.ExprStmt(expression=expr, line=tok.line, col=tok.col)
+
+    # ── Block parsing (INDENT / DEDENT) ────────────────────────────────────────
+
+    def _block(self) -> List[ast.Stmt]:
+        """
+        Parse an indented block or a curly-braced block.
+        """
+        self._skip_newlines()
+        if self._check(TT.LBRACE):
+            self._advance()  # consume '{'
+            self._skip_newlines()
+
+            has_indent = False
+            if self._check(TT.INDENT):
+                self._advance()
+                has_indent = True
+
+            stmts: List[ast.Stmt] = []
+            while not self._at_end():
+                self._skip_newlines()
+                if has_indent and self._check(TT.DEDENT):
+                    self._advance()
+                    has_indent = False
+                    self._skip_newlines()
+                if self._check(TT.RBRACE) or self._at_end():
+                    break
+                stmt = self._statement()
+                if stmt is not None:
+                    stmts.append(stmt)
+
+            self._consume(TT.RBRACE, "Expected '}' at the end of block")
+            return stmts
+
+        if not self._check(TT.INDENT):
+            header = self._line_start_token()
+            raise ParseError(
+                f"Expected an indented block after '{header.value}' on line {header.line}",
+                self._current(), show_got=False,
+            )
+
+        self._advance()                       # consume INDENT
+        stmts: List[ast.Stmt] = []
+
+        while not self._at_end() and not self._check(TT.DEDENT):
+            self._skip_newlines()
+            if self._check(TT.DEDENT) or self._at_end():
+                break
+            stmt = self._statement()
+            if stmt is not None:
+                stmts.append(stmt)
+
+        if self._check(TT.DEDENT):
+            self._advance()                   # consume DEDENT
+
+        return stmts
+
+    # ── Expression grammar (Pratt-style precedence) ────────────────────────────
+
+    def _expression(self) -> ast.Expr:
+        """Top-level expression. Handles ternary: condition ? then : else"""
+        expr = self._or()
+        if self._check(TT.QUESTION):
+            q = self._advance()        # consume '?'
+            self._skip_whitespace()
+            then_ex = self._or()
+            self._skip_whitespace()
+            self._consume(TT.COLON, "Expected ':' in ternary expression")
+            self._skip_whitespace()
+            else_ex = self._or()
+            return ast.TernaryExpr(condition=expr, then_expr=then_ex, else_expr=else_ex,
+                                   line=q.line, col=q.col)
+        if self._check(TT.IF) and self._current().line == self._tokens[self._pos - 1].line:
+            # Python-style inline conditional: value if condition else other
+            # (same line only: inside { } blocks an `if` on the next line is a new statement)
+            kw = self._advance()       # consume 'if'
+            cond = self._or()
+            self._consume(TT.ELSE, "Expected 'else' in inline conditional (value if condition else other)")
+            else_ex = self._expression()
+            return ast.TernaryExpr(condition=cond, then_expr=expr, else_expr=else_ex,
+                                   line=kw.line, col=kw.col)
+        return expr
+
+    def _or(self) -> ast.Expr:
+        left = self._and()
+        while self._check(TT.OR):
+            op  = self._advance()
+            right = self._and()
+            left = ast.Binary(left=left, operator="or", right=right,
+                              line=op.line, col=op.col)
+        return left
+
+    def _and(self) -> ast.Expr:
+        left = self._equality()
+        while self._check(TT.AND):
+            op    = self._advance()
+            right = self._equality()
+            left  = ast.Binary(left=left, operator="and", right=right,
+                               line=op.line, col=op.col)
+        return left
+
+    def _equality(self) -> ast.Expr:
+        left = self._comparison()
+        while self._current().type in (TT.EQ, TT.NEQ):
+            op    = self._advance()
+            right = self._comparison()
+            left  = ast.Binary(left=left, operator=op.value, right=right,
+                               line=op.line, col=op.col)
+        return left
+
+    def _comparison(self) -> ast.Expr:
+        left = self._term()
+        while self._current().type in (TT.GT, TT.GTE, TT.LT, TT.LTE):
+            op    = self._advance()
+            right = self._term()
+            left  = ast.Binary(left=left, operator=op.value, right=right,
+                               line=op.line, col=op.col)
+        return left
+
+    def _term(self) -> ast.Expr:
+        left = self._factor()
+        while self._current().type in (TT.PLUS, TT.MINUS):
+            op    = self._advance()
+            right = self._factor()
+            left  = ast.Binary(left=left, operator=op.value, right=right,
+                               line=op.line, col=op.col)
+        return left
+
+    def _factor(self) -> ast.Expr:
+        left = self._unary()
+        while self._current().type in (TT.STAR, TT.SLASH, TT.PERCENT):
+            op    = self._advance()
+            right = self._unary()
+            left  = ast.Binary(left=left, operator=op.value, right=right,
+                               line=op.line, col=op.col)
+        return left
+
+    def _unary(self) -> ast.Expr:
+        if self._current().type in (TT.NOT, TT.MINUS):
+            op      = self._advance()
+            operand = self._unary()
+            return ast.Unary(operator=op.value, operand=operand,
+                             line=op.line, col=op.col)
+        return self._call()
+
+    def _parse_arg(self) -> ast.Expr:
+        self._skip_whitespace()
+        tok = self._current()
+        # Check for named keyword argument: name = value or format = "..."
+        if (tok.type == TT.IDENTIFIER or tok.type in _KEYWORD_TYPES) and self._peek_token(1).type == TT.ASSIGN:
+            name_tok = self._advance()
+            self._advance()  # consume '='
+            self._skip_whitespace()
+            val_expr = self._expression()
+            return ast.NamedArg(name=name_tok.value, value=val_expr, line=name_tok.line, col=name_tok.col)
+        return self._expression()
+
+    def _close_paren(self, open_tok: Token, message: str) -> Token:
+        """Consume ')' or report the '(' that was never closed."""
+        if self._check(TT.RPAREN):
+            return self._advance()
+        if self._current().type == TT.EOF or self._current().line > open_tok.line:
+            raise ParseError(f"This '(' is never closed. Add a ')' to match it", open_tok, show_got=False)
+        raise ParseError(message, self._current())
+
+    def _call(self) -> ast.Expr:
+        expr = self._primary()
+        while True:
+            if self._match(TT.LPAREN):
+                open_tok = self._tokens[self._pos - 1]
+                args: List[ast.Expr] = []
+                self._skip_whitespace()
+                if not self._check(TT.RPAREN):
+                    args.append(self._parse_arg())
+                    self._skip_whitespace()
+                    while self._match(TT.COMMA):
+                        self._skip_whitespace()
+                        if self._check(TT.RPAREN):
+                            break
+                        args.append(self._parse_arg())
+                        self._skip_whitespace()
+                self._close_paren(open_tok, "Expected ')' after arguments")
+                # Locate the call at its callee so errors point at the function name
+                expr  = ast.Call(callee=expr, arguments=args,
+                                 line=expr.line, col=expr.col)
+            elif self._match(TT.LBRACKET):
+                index = self._expression()
+                close = self._consume(TT.RBRACKET, "Expected ']' after index")
+                expr  = ast.Index(object=expr, index=index,
+                                  line=close.line, col=close.col)
+            elif self._match(TT.DOT):
+                tok = self._current()
+                if tok.type == TT.IDENTIFIER or tok.type in _KEYWORD_TYPES:
+                    self._advance()
+                    prop = tok
+                else:
+                    raise ParseError("Expected property name after '.'", tok)
+                expr = ast.Property(object=expr, name=prop.value, safe=False,
+                                    line=prop.line, col=prop.col)
+            elif self._match(TT.SAFE_DOT):
+                # obj?.name — returns None if obj is None
+                tok = self._current()
+                if tok.type == TT.IDENTIFIER or tok.type in _KEYWORD_TYPES:
+                    self._advance()
+                    prop = tok
+                else:
+                    raise ParseError("Expected property name after '?.'", tok)
+                expr = ast.Property(object=expr, name=prop.value, safe=True,
+                                    line=prop.line, col=prop.col)
+            else:
+                break
+        return expr
+
+    def _primary(self) -> ast.Expr:
+        tok = self._current()
+
+        if self._match(TT.NUMBER):
+            v = tok.value
+            return ast.Literal(
+                value=float(v) if "." in v else int(v),
+                line=tok.line, col=tok.col,
+            )
+
+        if self._match(TT.STRING):
+            return ast.Literal(value=tok.value, line=tok.line, col=tok.col)
+
+        if self._check(TT.IDENTIFIER) or self._current().type in _SOFT_KEYWORDS:
+            tok = self._advance()
+            # Arrow function: single param shorthand   x => expr
+            if self._check(TT.ARROW):
+                self._advance()              # consume '=>'
+                body = self._expression()
+                return ast.ArrowFunc(params=[tok.value], body=body,
+                                     line=tok.line, col=tok.col)
+            return ast.Variable(name=tok.value, line=tok.line, col=tok.col)
+
+        # await keyword used as an expression
+        if self._match(TT.AWAIT):
+            args: List[ast.Expr] = []
+            while not self._at_eol():
+                args.append(self._expression())
+            # await("a", "b") parses as one tuple — spread it into arguments
+            if len(args) == 1 and isinstance(args[0], ast.MCNTuple):
+                args = list(args[0].elements)
+            callee = ast.Variable(name="await", line=tok.line, col=tok.col)
+            return ast.Call(callee=callee, arguments=args,
+                            line=tok.line, col=tok.col)
+
+        # Parenthesised expression or tuple: (expr) or (a, b, c) or (a,)
+        if self._match(TT.LPAREN):
+            elements: List[ast.Expr] = []
+            trailing_comma = False
+            self._skip_whitespace()
+            if not self._check(TT.RPAREN):
+                elements.append(self._expression())
+                self._skip_whitespace()
+                while self._match(TT.COMMA):
+                    self._skip_whitespace()
+                    if self._check(TT.RPAREN):   # trailing comma
+                        trailing_comma = True
+                        break
+                    elements.append(self._expression())
+                    self._skip_whitespace()
+            self._consume(TT.RPAREN, "Expected ')' after expression")
+            # Arrow function: (x, y) => expr  or  (x) => expr
+            if self._check(TT.ARROW):
+                self._advance()              # consume '=>'
+                # params must all be plain identifiers
+                params = []
+                for el in elements:
+                    if isinstance(el, ast.Variable):
+                        params.append(el.name)
+                    else:
+                        raise ParseError("Arrow function params must be identifiers", tok)
+                body = self._expression()
+                return ast.ArrowFunc(params=params, body=body,
+                                     line=tok.line, col=tok.col)
+
+            # (x,) or (x, y) → tuple; (x) without trailing comma → grouped expr
+            if len(elements) == 1 and not trailing_comma:
+                return elements[0]
+            return ast.MCNTuple(elements=elements, line=tok.line, col=tok.col)
+
+        # Array literal: [a, b, c] or [a, b,] — may span multiple lines
+        if self._match(TT.LBRACKET):
+            elements = []
+            self._skip_whitespace()
+            if not self._check(TT.RBRACKET):
+                elements.append(self._expression())
+                self._skip_whitespace()
+                while self._match(TT.COMMA):
+                    self._skip_whitespace()
+                    if self._check(TT.RBRACKET):  # trailing comma
+                        break
+                    elements.append(self._expression())
+                    self._skip_whitespace()
+            self._consume(TT.RBRACKET, "Expected ']' after array elements")
+            return ast.Array(elements=elements, line=tok.line, col=tok.col)
+
+        # Object literal: {key: value, ...} — may span multiple lines
+        # Keys may be identifiers, string literals, OR reserved keywords used
+        # as property names (e.g. {task: "send_email", type: "job"}).
+        if self._match(TT.LBRACE):
+            props = []
+            self._skip_whitespace()
+            if not self._check(TT.RBRACE):
+                key = self._object_key()
+                self._consume(TT.COLON, "Expected ':' after object key")
+                val = self._expression()
+                props.append((key, val))
+                self._skip_whitespace()
+                while self._match(TT.COMMA):
+                    self._skip_whitespace()
+                    if self._check(TT.RBRACE):   # trailing comma
+                        break
+                    key = self._object_key()
+                    self._consume(TT.COLON, "Expected ':' after object key")
+                    val = self._expression()
+                    props.append((key, val))
+                    self._skip_whitespace()
+            self._consume(TT.RBRACE, "Expected '}' after object properties")
+            return ast.MCNObject(properties=props, line=tok.line, col=tok.col)
+
+        raise ParseError("Unexpected token", tok)
+
+    # ── Helpers ────────────────────────────────────────────────────────────────
+
+    def _object_key(self) -> ast.Expr:
+        """
+        Parse an object literal key.  Accepts:
+          - identifiers:       {name: ...}
+          - string literals:   {"key": ...}
+          - any keyword token: {task: ..., type: ..., service: ...}
+        Returns a Literal (string) or Variable node.
+        """
+        t = self._current()
+        if t.type == TT.IDENTIFIER:
+            self._advance()
+            return ast.Variable(name=t.value, line=t.line, col=t.col)
+        if t.type == TT.STRING:
+            self._advance()
+            return ast.Literal(value=t.value, line=t.line, col=t.col)
+        if t.type in _KEYWORD_TYPES:
+            # Treat keyword as a plain string key so {task: x, type: y} works
+            self._advance()
+            return ast.Literal(value=t.value, line=t.line, col=t.col)
+        raise ParseError("Expected object key (identifier or string)", t)
+
+    def _advance(self) -> Token:
+        tok = self._tokens[self._pos]
+        if not self._at_end():
+            self._pos += 1
+        return tok
+
+    def _current(self) -> Token:
+        return self._tokens[self._pos]
+
+    def _peek_token(self, offset: int = 1) -> Token:
+        idx = self._pos + offset
+        if idx < len(self._tokens):
+            return self._tokens[idx]
+        return self._tokens[-1]
+
+    def _check(self, tt: TT) -> bool:
+        return self._current().type == tt
+
+    def _match(self, tt: TT) -> bool:
+        if self._check(tt):
+            self._advance()
+            return True
+        return False
+
+    def _consume(self, tt: TT, message: str) -> Token:
+        if self._check(tt):
+            return self._advance()
+        if tt == TT.IDENTIFIER and self._current().type in _SOFT_KEYWORDS:
+            return self._advance()          # e.g. `function test()`, `for task in ...`
+        raise ParseError(message, self._current())
+
+    def _consume_end(self):
+        """Consume a trailing NEWLINE if present; silently accept EOF / DEDENT."""
+        self._skip_newlines()
+
+    def _skip_newlines(self):
+        while self._check(TT.NEWLINE):
+            self._advance()
+
+    def _skip_whitespace(self):
+        """Skip NEWLINE, INDENT, and DEDENT — used inside multi-line collections."""
+        while self._current().type in (TT.NEWLINE, TT.INDENT, TT.DEDENT):
+            self._advance()
+
+    def _at_end(self) -> bool:
+        return self._current().type == TT.EOF
+
+    def _at_eol(self) -> bool:
+        """True when we are at a logical end-of-line (can't parse more on this line)."""
+        return self._current().type in (TT.NEWLINE, TT.EOF, TT.DEDENT)
+
+    def _line_start_token(self) -> Token:
+        """First token of the logical line before the current position (the block header)."""
+        i = self._pos - 1
+        while i > 0 and self._tokens[i].type == TT.NEWLINE:
+            i -= 1
+        while i > 0 and self._tokens[i - 1].type not in (TT.NEWLINE, TT.INDENT, TT.DEDENT):
+            i -= 1
+        return self._tokens[max(i, 0)]
+
+    def _is_jsx_expr_attr(self) -> bool:
+        """At '{' after `attr=`: True for a JSX-style {expr} wrapper, False for an
+        object literal ({} or {key: ...})."""
+        nxt = self._tokens[self._pos + 1] if self._pos + 1 < len(self._tokens) else None
+        after = self._tokens[self._pos + 2] if self._pos + 2 < len(self._tokens) else None
+        if nxt is None or nxt.type == TT.RBRACE:
+            return False
+        if nxt.type in (TT.IDENTIFIER, TT.STRING) and after is not None and after.type == TT.COLON:
+            return False
+        return True
+
+
+    # ── 2030 Language Primitive Parsers ────────────────────────────────────────
+
+    def _pipeline_decl(self) -> ast.PipelineDecl:
+        """
+        pipeline name
+            stage stage_name[(params)]
+                body
+            stage ...
+        """
+        tok      = self._advance()   # consume PIPELINE
+        name_tok = self._consume(TT.IDENTIFIER, "Expected pipeline name")
+        self._consume_end()
+
+        stages: List[ast.StageDecl] = []
+        self._skip_newlines()
+        if self._check(TT.INDENT):
+            self._advance()          # consume INDENT
+            while not self._at_end() and not self._check(TT.DEDENT):
+                self._skip_newlines()
+                if self._check(TT.DEDENT) or self._at_end():
+                    break
+                if self._check(TT.STAGE):
+                    stages.append(self._stage_decl())
+                else:
+                    self._advance()  # skip unexpected token
+            if self._check(TT.DEDENT):
+                self._advance()      # consume DEDENT
+
+        return ast.PipelineDecl(name=name_tok.value, stages=stages,
+                                line=tok.line, col=tok.col)
+
+    def _stage_decl(self) -> ast.StageDecl:
+        tok      = self._advance()   # consume STAGE
+        name_tok = self._consume(TT.IDENTIFIER, "Expected stage name")
+        params: List[str] = []
+        defaults: dict    = {}
+        if self._match(TT.LPAREN):
+            params, defaults, _ = self._parse_params()
+            self._consume(TT.RPAREN, "Expected ')' after stage parameters")
+        self._consume_end()
+        body = self._block()
+        return ast.StageDecl(name=name_tok.value, params=params, defaults=defaults,
+                             body=body, line=tok.line, col=tok.col)
+
+    def _service_decl(self) -> ast.ServiceDecl:
+        """
+        service name
+            port 8080
+            auth "token"            # or "jwt"; every endpoint then needs a bearer token
+            public login, health    # endpoints that stay open
+            endpoint name[(params)]
+                body
+        """
+        tok      = self._advance()   # consume SERVICE
+        name_tok = self._consume(TT.IDENTIFIER, "Expected service name")
+        self._consume_end()
+
+        port: Optional[int] = None
+        endpoints: List[ast.EndpointDecl] = []
+        auth = ""
+        public: List[str] = []
+
+        self._skip_newlines()
+        if self._check(TT.INDENT):
+            self._advance()          # consume INDENT
+            while not self._at_end() and not self._check(TT.DEDENT):
+                self._skip_newlines()
+                if self._check(TT.DEDENT) or self._at_end():
+                    break
+                if self._check(TT.PORT):
+                    self._advance()  # consume PORT
+                    port_tok = self._consume(TT.NUMBER, "Expected port number")
+                    port = int(float(port_tok.value))
+                    self._consume_end()
+                elif self._check(TT.ENDPOINT):
+                    endpoints.append(self._endpoint_decl())
+                elif self._current().value == "auth":
+                    self._advance()
+                    mode_tok = self._consume(TT.STRING, 'Expected "token" or "jwt" after auth')
+                    if mode_tok.value not in ("token", "jwt"):
+                        raise ParseError('auth must be "token" or "jwt"', mode_tok)
+                    auth = mode_tok.value
+                    self._consume_end()
+                elif self._current().value == "public":
+                    self._advance()
+                    while not self._at_eol():
+                        public.append(self._advance().value)
+                        self._match(TT.COMMA)
+                    self._consume_end()
+                else:
+                    self._advance()
+            if self._check(TT.DEDENT):
+                self._advance()      # consume DEDENT
+
+        return ast.ServiceDecl(name=name_tok.value, port=port, endpoints=endpoints,
+                               auth=auth, public=public, line=tok.line, col=tok.col)
+
+    def _endpoint_decl(self) -> ast.EndpointDecl:
+        tok      = self._advance()   # consume ENDPOINT
+        name_tok = self._consume(TT.IDENTIFIER, "Expected endpoint name")
+        params: List[str] = []
+        defaults: dict    = {}
+        if self._match(TT.LPAREN):
+            params, defaults, _ = self._parse_params()
+            self._consume(TT.RPAREN, "Expected ')' after endpoint parameters")
+        self._consume_end()
+        body = self._block()
+        return ast.EndpointDecl(name=name_tok.value, params=params, defaults=defaults,
+                                body=body, line=tok.line, col=tok.col)
+
+    def _workflow_decl(self) -> ast.WorkflowDecl:
+        """
+        workflow name
+            step name[(params)]
+                body
+        """
+        tok      = self._advance()   # consume WORKFLOW
+        name_tok = self._consume(TT.IDENTIFIER, "Expected workflow name")
+        self._consume_end()
+
+        steps: List[ast.StepDecl] = []
+        self._skip_newlines()
+        if self._check(TT.INDENT):
+            self._advance()          # consume INDENT
+            while not self._at_end() and not self._check(TT.DEDENT):
+                self._skip_newlines()
+                if self._check(TT.DEDENT) or self._at_end():
+                    break
+                if self._check(TT.STEP):
+                    steps.append(self._step_decl())
+                else:
+                    self._advance()
+            if self._check(TT.DEDENT):
+                self._advance()      # consume DEDENT
+
+        return ast.WorkflowDecl(name=name_tok.value, steps=steps,
+                                line=tok.line, col=tok.col)
+
+    def _step_decl(self) -> ast.StepDecl:
+        tok      = self._advance()   # consume STEP
+        name_tok = self._consume(TT.IDENTIFIER, "Expected step name")
+        params: List[str] = []
+        defaults: dict    = {}
+        if self._match(TT.LPAREN):
+            params, defaults, _ = self._parse_params()
+            self._consume(TT.RPAREN, "Expected ')' after step parameters")
+        self._consume_end()
+        body = self._block()
+        return ast.StepDecl(name=name_tok.value, params=params, defaults=defaults,
+                            body=body, line=tok.line, col=tok.col)
+
+    def _contract_decl(self) -> ast.ContractDecl:
+        """
+        contract name
+            field_name: type_name
+            ...
+        """
+        tok      = self._advance()   # consume CONTRACT
+        name_tok = self._consume(TT.IDENTIFIER, "Expected contract name")
+        self._consume_end()
+
+        fields: List[ast.ContractField] = []
+        self._skip_newlines()
+        if self._check(TT.INDENT):
+            self._advance()          # consume INDENT
+            while not self._at_end() and not self._check(TT.DEDENT):
+                self._skip_newlines()
+                if self._check(TT.DEDENT) or self._at_end():
+                    break
+                tok_field = self._current()
+                if tok_field.type == TT.IDENTIFIER or tok_field.type in _KEYWORD_TYPES:
+                    field_name = self._advance()
+                else:
+                    raise ParseError("Expected field name", tok_field)
+                self._consume(TT.COLON, "Expected ':' after field name")
+                
+                tok_type = self._current()
+                if tok_type.type == TT.IDENTIFIER or tok_type.type in _KEYWORD_TYPES:
+                    type_tok = self._advance()
+                else:
+                    raise ParseError("Expected type name", tok_type)
+                self._consume_end()
+                fields.append(ast.ContractField(
+                    name=field_name.value, type_name=type_tok.value,
+                    line=field_name.line, col=field_name.col,
+                ))
+            if self._check(TT.DEDENT):
+                self._advance()      # consume DEDENT
+
+        return ast.ContractDecl(name=name_tok.value, fields=fields,
+                                line=tok.line, col=tok.col)
+
+    def _prompt_decl(self) -> ast.PromptDecl:
+        """
+        prompt name
+            system "..."
+            user   "..."
+            format text | json
+
+        `system`, `user`, `format` are parsed as plain identifiers (not keywords)
+        so they remain usable as variable names elsewhere.
+        """
+        tok      = self._advance()   # consume PROMPT
+        name_tok = self._consume(TT.IDENTIFIER, "Expected prompt name")
+        self._consume_end()
+
+        system_str = ""
+        user_str   = ""
+        fmt_str    = "text"
+
+        self._skip_newlines()
+        if self._check(TT.INDENT):
+            self._advance()          # consume INDENT
+            while not self._at_end() and not self._check(TT.DEDENT):
+                self._skip_newlines()
+                if self._check(TT.DEDENT) or self._at_end():
+                    break
+                if self._check(TT.IDENTIFIER):
+                    key_tok = self._advance()
+                    key     = key_tok.value
+                    if key == "system":
+                        str_tok    = self._consume(TT.STRING, "Expected string after 'system'")
+                        system_str = str_tok.value
+                        self._consume_end()
+                    elif key == "user":
+                        str_tok  = self._consume(TT.STRING, "Expected string after 'user'")
+                        user_str = str_tok.value
+                        self._consume_end()
+                    elif key == "format":
+                        # format text | format json
+                        if self._check(TT.IDENTIFIER) or self._check(TT.STRING):
+                            fmt_str = self._advance().value
+                        self._consume_end()
+                    else:
+                        # Unknown config line — skip to end of line
+                        while not self._at_end() and not self._check(TT.NEWLINE):
+                            self._advance()
+                        self._consume_end()
+                else:
+                    self._advance()  # skip unexpected
+            if self._check(TT.DEDENT):
+                self._advance()      # consume DEDENT
+
+        return ast.PromptDecl(name=name_tok.value, system=system_str,
+                              user=user_str, format=fmt_str,
+                              line=tok.line, col=tok.col)
+
+    def _agent_decl(self) -> ast.AgentDecl:
+        """
+        agent name
+            model  "claude-3-5-sonnet"
+            tools  fetch, query, ai
+            memory session
+
+            task task_name(params)
+                body...
+        """
+        tok      = self._advance()   # consume AGENT
+        name_tok = self._consume(TT.IDENTIFIER, "Expected agent name")
+        self._consume_end()
+
+        model_str  = ""
+        tools_list: List[str] = []
+        memory_str = ""
+        tasks: List[ast.AgentTaskDecl] = []
+
+        self._skip_newlines()
+        if self._check(TT.INDENT):
+            self._advance()          # consume INDENT
+            while not self._at_end() and not self._check(TT.DEDENT):
+                self._skip_newlines()
+                if self._check(TT.DEDENT) or self._at_end():
+                    break
+
+                # task keyword → parse task block
+                if self._check(TT.TASK):
+                    tasks.append(self._agent_task_decl())
+                    continue
+
+                # config lines: model / tools / memory  (plain identifiers)
+                if self._check(TT.IDENTIFIER):
+                    key_tok = self._advance()
+                    key     = key_tok.value
+
+                    if key == "model":
+                        str_tok   = self._consume(TT.STRING,
+                                                  "Expected model name string after 'model'")
+                        model_str = str_tok.value
+                        self._consume_end()
+
+                    elif key == "tools":
+                        # tools fetch, query, ai
+                        if self._check(TT.IDENTIFIER):
+                            tools_list.append(self._advance().value)
+                            while self._match(TT.COMMA):
+                                if self._check(TT.IDENTIFIER):
+                                    tools_list.append(self._advance().value)
+                        self._consume_end()
+
+                    elif key == "memory":
+                        if self._check(TT.IDENTIFIER) or self._check(TT.STRING):
+                            memory_str = self._advance().value
+                        self._consume_end()
+
+                    else:
+                        # Unknown config — skip line
+                        while not self._at_end() and not self._check(TT.NEWLINE):
+                            self._advance()
+                        self._consume_end()
+                else:
+                    self._advance()  # skip unexpected token
+
+            if self._check(TT.DEDENT):
+                self._advance()      # consume DEDENT
+
+        return ast.AgentDecl(name=name_tok.value, model=model_str,
+                             tools=tools_list, memory=memory_str, tasks=tasks,
+                             line=tok.line, col=tok.col)
+
+    def _break_stmt(self) -> ast.BreakStmt:
+        tok = self._advance()          # consume BREAK
+        self._consume_end()
+        return ast.BreakStmt(line=tok.line, col=tok.col)
+
+    def _continue_stmt(self) -> ast.ContinueStmt:
+        tok = self._advance()          # consume CONTINUE
+        self._consume_end()
+        return ast.ContinueStmt(line=tok.line, col=tok.col)
+
+    def _assert_stmt(self) -> ast.AssertStmt:
+        """
+        assert condition
+        assert condition, "message"
+        """
+        tok       = self._advance()    # consume ASSERT
+        condition = self._expression()
+        message: Optional[ast.Expr] = None
+        if self._match(TT.COMMA):
+            message = self._expression()
+        self._consume_end()
+        return ast.AssertStmt(condition=condition, message=message,
+                              line=tok.line, col=tok.col)
+
+    def _on_statement(self) -> ast.Stmt:
+        tok = self._advance()  # consume ON
+        # Handle "on event 'name'" or "on 'name'"
+        if self._current().type == TT.IDENTIFIER and self._current().value == "event":
+            self._advance()  # consume "event"
+        event_expr = self._expression()
+        args = [event_expr]
+        if not self._at_eol():
+            args.append(self._expression())
+        self._consume_end()
+        callee = ast.Variable(name="on", line=tok.line, col=tok.col)
+        call = ast.Call(callee=callee, arguments=args, line=tok.line, col=tok.col)
+        return ast.ExprStmt(expression=call, line=tok.line, col=tok.col)
+
+    def _test_decl(self) -> ast.TestDecl:
+        """
+        test "description"
+            assert condition
+            assert condition, "message"
+            ...
+        """
+        tok      = self._advance()     # consume TEST
+        desc_tok = self._consume(TT.STRING, "Expected test description string")
+        self._consume_end()
+        body = self._block()
+        return ast.TestDecl(description=desc_tok.value, body=body,
+                            line=tok.line, col=tok.col)
+
+    def _agent_task_decl(self) -> ast.AgentTaskDecl:
+        """
+        task task_name(param1, param2)
+            body...
+        """
+        tok      = self._advance()   # consume TASK
+        name_tok = self._consume(TT.IDENTIFIER, "Expected task name")
+        params: List[str] = []
+        defaults: dict    = {}
+        if self._match(TT.LPAREN):
+            params, defaults, _ = self._parse_params()
+            self._consume(TT.RPAREN, "Expected ')' after task parameters")
+        self._consume_end()
+        body = self._block()
+        return ast.AgentTaskDecl(name=name_tok.value, params=params, defaults=defaults,
+                                 body=body, line=tok.line, col=tok.col)
+
+
+    def _mcp_decl(self) -> ast.MCPServerDecl:
+        """
+        mcp server_name
+            transport "stdio"
+            command   "npx"
+            args      ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+            url       "http://localhost:3000/sse"   # for sse/http transport
+
+            tool read_file(path)
+            tool write_file(path, content)
+        """
+        tok      = self._advance()   # consume MCP
+        name_tok = self._consume(TT.IDENTIFIER, "Expected MCP server name")
+        self._consume_end()
+
+        transport = "stdio"
+        command   = ""
+        args:  List[str]         = []
+        url    = ""
+        tools: List[ast.MCPToolDecl] = []
+
+        self._skip_newlines()
+        if self._check(TT.INDENT):
+            self._advance()          # consume INDENT
+            while not self._at_end() and not self._check(TT.DEDENT):
+                self._skip_newlines()
+                if self._check(TT.DEDENT) or self._at_end():
+                    break
+
+                if self._check(TT.TOOL):
+                    tools.append(self._mcp_tool_decl())
+                    continue
+
+                if self._check(TT.IDENTIFIER):
+                    key_tok = self._advance()
+                    key     = key_tok.value
+
+                    if key == "transport":
+                        transport = self._consume(TT.STRING, "Expected transport string").value
+                        self._consume_end()
+
+                    elif key == "command":
+                        command = self._consume(TT.STRING, "Expected command string").value
+                        self._consume_end()
+
+                    elif key == "url":
+                        url = self._consume(TT.STRING, "Expected URL string").value
+                        self._consume_end()
+
+                    elif key == "args":
+                        # args ["a", "b", "c"]
+                        if self._match(TT.LBRACKET):
+                            self._skip_whitespace()
+                            while not self._check(TT.RBRACKET) and not self._at_end():
+                                if self._check(TT.STRING):
+                                    args.append(self._advance().value)
+                                self._skip_whitespace()
+                                self._match(TT.COMMA)
+                                self._skip_whitespace()
+                            self._consume(TT.RBRACKET, "Expected ']' after args")
+                        self._consume_end()
+
+                    else:
+                        while not self._at_end() and not self._check(TT.NEWLINE):
+                            self._advance()
+                        self._consume_end()
+                else:
+                    self._advance()
+
+            if self._check(TT.DEDENT):
+                self._advance()      # consume DEDENT
+
+        return ast.MCPServerDecl(
+            name=name_tok.value, transport=transport, command=command,
+            args=args, url=url, tools=tools,
+            line=tok.line, col=tok.col,
+        )
+
+    def _mcp_tool_decl(self) -> ast.MCPToolDecl:
+        """tool name(param1, param2)"""
+        tok      = self._advance()   # consume TOOL
+        name_tok = self._consume(TT.IDENTIFIER, "Expected tool name")
+        params: List[str] = []
+        if self._match(TT.LPAREN):
+            if not self._check(TT.RPAREN):
+                params.append(self._consume(TT.IDENTIFIER, "Expected param name").value)
+                while self._match(TT.COMMA):
+                    params.append(self._consume(TT.IDENTIFIER, "Expected param name").value)
+            self._consume(TT.RPAREN, "Expected ')' after tool parameters")
+        self._consume_end()
+        return ast.MCPToolDecl(name=name_tok.value, params=params,
+                               line=tok.line, col=tok.col)
+
+
+    # ── UI / Frontend Parsers ──────────────────────────────────────────────────
+
+    def _component_decl(self) -> ast.ComponentDecl:
+        """
+        component Name
+            state name = default
+            on event
+                body
+            render
+                ui_element [attrs] [text]
+                    child_element [attrs]
+        """
+        tok      = self._advance()               # consume COMPONENT
+        name_tok = self._consume(TT.IDENTIFIER, "Expected component name")
+        self._consume_end()
+
+        states:   List[ast.ComponentStateDecl] = []
+        handlers: List[ast.OnHandler]          = []
+        render:   Optional[ast.RenderBlock]    = None
+
+        self._skip_newlines()
+        if self._check(TT.INDENT):
+            self._advance()                      # consume INDENT
+            while not self._at_end() and not self._check(TT.DEDENT):
+                self._skip_newlines()
+                if self._check(TT.DEDENT) or self._at_end():
+                    break
+                cur = self._current()
+
+                if cur.type == TT.STATE:
+                    states.append(self._component_state_decl())
+
+                elif cur.type == TT.ON:
+                    handlers.append(self._on_handler())
+
+                elif cur.type == TT.RENDER:
+                    render = self._render_block()
+
+                else:
+                    self._advance()   # skip unknown token
+
+            if self._check(TT.DEDENT):
+                self._advance()
+
+        return ast.ComponentDecl(
+            name=name_tok.value, states=states,
+            handlers=handlers, render=render,
+            line=tok.line, col=tok.col,
+        )
+
+    def _component_state_decl(self) -> ast.ComponentStateDecl:
+        """state name = default_expr"""
+        tok      = self._advance()               # consume STATE
+        cur = self._current()
+        if cur.type == TT.IDENTIFIER or cur.type in _KEYWORD_TYPES:
+            name_tok = self._advance()
+        else:
+            name_tok = self._consume(TT.IDENTIFIER, "Expected state variable name")
+        self._consume(TT.ASSIGN, "Expected '=' after state name")
+        value    = self._expression()
+        self._consume_end()
+        return ast.ComponentStateDecl(
+            name=name_tok.value, value=value,
+            line=tok.line, col=tok.col,
+        )
+
+    def _on_handler(self) -> ast.OnHandler:
+        """on event_name\n    body"""
+        tok       = self._advance()              # consume ON
+        event_tok = self._consume(TT.IDENTIFIER, "Expected event name after 'on'")
+        self._consume_end()
+        body = self._block()
+        return ast.OnHandler(
+            event=event_tok.value, body=body,
+            line=tok.line, col=tok.col,
+        )
+
+    def _render_block(self) -> ast.RenderBlock:
+        """render\n    ui_elements..."""
+        tok = self._advance()                    # consume RENDER
+        self._consume_end()
+        elements: List[ast.UIElement] = []
+        self._skip_newlines()
+        if self._check(TT.INDENT):
+            self._advance()                      # consume INDENT
+            while not self._at_end() and not self._check(TT.DEDENT):
+                self._skip_newlines()
+                if self._check(TT.DEDENT) or self._at_end():
+                    break
+                elements.append(self._ui_element_or_for())
+            if self._check(TT.DEDENT):
+                self._advance()
+        return ast.RenderBlock(elements=elements, line=tok.line, col=tok.col)
+
+    def _ui_element_or_for(self) -> ast.UIElement:
+        """Parse either a `for var in iterable` loop or a normal UI element."""
+        if self._check(TT.FOR):
+            return self._ui_for_element()
+        return self._ui_element()
+
+    def _ui_for_element(self) -> ast.UIElement:
+        """
+        for var_name in iterable_expr
+            child_element ...
+        """
+        tok = self._advance()                    # consume FOR
+        var_tok = self._consume(TT.IDENTIFIER, "Expected loop variable after 'for'")
+        # consume optional 'in' keyword (IN token or IDENTIFIER 'in')
+        if self._check(TT.IN):
+            self._advance()                      # consume IN
+        elif (self._check(TT.IDENTIFIER) and
+              self._current().value == "in"):
+            self._advance()                      # consume 'in' as identifier
+        iterable = self._expression()
+        self._consume_end()
+
+        children: List[ast.UIElement] = []
+        self._skip_newlines()
+        if self._check(TT.INDENT):
+            self._advance()                      # consume INDENT
+            while not self._at_end() and not self._check(TT.DEDENT):
+                self._skip_newlines()
+                if self._check(TT.DEDENT) or self._at_end():
+                    break
+                children.append(self._ui_element_or_for())
+            if self._check(TT.DEDENT):
+                self._advance()
+
+        return ast.UIElement(
+            tag="for", attrs=[], text=None, children=children,
+            for_var=var_tok.value, for_iterable=iterable,
+            line=tok.line, col=tok.col,
+        )
+
+    def _ui_element(self) -> ast.UIElement:
+        """
+        tag_name [key=value ...] ["text"]
+            child_element ...
+        """
+        tok     = self._current()
+        tag_tok = self._consume(TT.IDENTIFIER, "Expected UI element tag name")
+        tag     = tag_tok.value
+
+        attrs: List[ast.UIAttr] = []
+        text:  Optional[ast.Expr] = None
+
+        # Parse inline attrs and optional text on the same line
+        while not self._at_eol():
+            cur = self._current()
+
+            # key=value attribute  (IDENTIFIER ASSIGN expr); keywords work as
+            # keys too, e.g. chat endpoint=ask_bot
+            if ((cur.type == TT.IDENTIFIER or (isinstance(cur.value, str) and cur.value.isidentifier()
+                                                and cur.type not in (TT.STRING, TT.NUMBER))) and
+                    self._pos + 1 < len(self._tokens) and
+                    self._tokens[self._pos + 1].type == TT.ASSIGN):
+                key_tok = self._advance()        # consume key
+                self._advance()                  # consume =
+                if self._check(TT.LBRACE) and self._is_jsx_expr_attr():
+                    # JSX-style attr={expr}, e.g. style={{"width": "50%"}}
+                    self._advance()              # consume outer {
+                    val = self._expression()
+                    self._consume(TT.RBRACE, "Expected '}' to close attribute expression")
+                else:
+                    val = self._expression()
+                attrs.append(ast.UIAttr(key=key_tok.value, value=val,
+                                        line=key_tok.line, col=key_tok.col))
+
+            # bare identifier attribute (boolean flag, e.g. `disabled`)
+            elif cur.type == TT.IDENTIFIER:
+                key_tok = self._advance()
+                attrs.append(ast.UIAttr(key=key_tok.value, value=None,
+                                        line=key_tok.line, col=key_tok.col))
+
+            # string → inline text content: button "Submit"
+            elif cur.type == TT.STRING:
+                str_tok = self._advance()
+                text = ast.Literal(value=str_tok.value,
+                                   line=str_tok.line, col=str_tok.col)
+            # expression → inline text expression: span {j.title}
+            elif cur.type == TT.LBRACE:
+                self._advance() # consume {
+                text = self._expression()
+                self._consume(TT.RBRACE, "Expected '}' after inline text expression")
+
+            else:
+                break  # stop at NEWLINE / DEDENT / other
+
+        self._consume_end()
+
+        # Parse indented children (support `for` loops as children too)
+        children: List[ast.UIElement] = []
+        self._skip_newlines()
+        if self._check(TT.INDENT):
+            self._advance()                      # consume INDENT
+            while not self._at_end() and not self._check(TT.DEDENT):
+                self._skip_newlines()
+                if self._check(TT.DEDENT) or self._at_end():
+                    break
+                children.append(self._ui_element_or_for())
+            if self._check(TT.DEDENT):
+                self._advance()
+
+        return ast.UIElement(
+            tag=tag, attrs=attrs, text=text, children=children,
+            line=tok.line, col=tok.col,
+        )
+
+    def _app_decl(self) -> ast.AppDecl:
+        """
+        app AppName
+            title  "App Title"
+            theme  "professional"
+            layout
+                sidebar
+                    nav "Label" icon="home"
+                tabs
+                    tab "Label" → ComponentName
+                main
+                    ComponentName
+        """
+        tok      = self._advance()               # consume APP
+        name_tok = self._consume(TT.IDENTIFIER, "Expected app name")
+        self._consume_end()
+
+        title  = ""
+        theme  = "default"
+        extras: dict = {}
+        layout: Optional[ast.LayoutBlock] = None
+
+        self._skip_newlines()
+        if self._check(TT.INDENT):
+            self._advance()                      # consume INDENT
+            while not self._at_end() and not self._check(TT.DEDENT):
+                self._skip_newlines()
+                if self._check(TT.DEDENT) or self._at_end():
+                    break
+                cur = self._current()
+
+                if cur.type == TT.IDENTIFIER and cur.value == "title":
+                    self._advance()
+                    str_tok = self._consume(TT.STRING, "Expected string after 'title'")
+                    title = str_tok.value
+                    self._consume_end()
+
+                elif cur.type == TT.IDENTIFIER and cur.value == "theme":
+                    self._advance()
+                    str_tok = self._consume(TT.STRING, "Expected string after 'theme'")
+                    theme = str_tok.value
+                    self._consume_end()
+
+                elif cur.type == TT.IDENTIFIER and cur.value in ("footer", "logo"):
+                    key = self._advance().value
+                    str_tok = self._consume(TT.STRING, f"Expected text after '{key}'")
+                    extras[key] = str_tok.value
+                    self._consume_end()
+
+                elif cur.type == TT.LAYOUT:
+                    layout = self._layout_block()
+
+                else:
+                    self._advance()
+
+            if self._check(TT.DEDENT):
+                self._advance()
+
+        return ast.AppDecl(
+            name=name_tok.value, title=title, theme=theme, layout=layout,
+            footer=extras.get("footer", ""), logo=extras.get("logo", ""),
+            line=tok.line, col=tok.col,
+        )
+
+    def _layout_block(self) -> ast.LayoutBlock:
+        """
+        layout
+            sidebar
+                nav "Label" icon="icon"
+            tabs
+                tab "Label" ComponentName
+            main
+                ComponentName
+        """
+        self._advance()      # consume LAYOUT
+        self._consume_end()
+
+        sidebar: List[ast.NavItem]  = []
+        tabs:    List[ast.TabItem]  = []
+        main:    List[str]          = []
+
+        self._skip_newlines()
+        if self._check(TT.INDENT):
+            self._advance()  # consume INDENT
+            while not self._at_end() and not self._check(TT.DEDENT):
+                self._skip_newlines()
+                if self._check(TT.DEDENT) or self._at_end():
+                    break
+                cur = self._current()
+
+                # sidebar block
+                if cur.type == TT.IDENTIFIER and cur.value == "sidebar":
+                    self._advance(); self._consume_end()
+                    self._skip_newlines()
+                    if self._check(TT.INDENT):
+                        self._advance()
+                        while not self._check(TT.DEDENT) and not self._at_end():
+                            self._skip_newlines()
+                            if self._check(TT.DEDENT): break
+                            c = self._current()
+                            if c.type == TT.IDENTIFIER and c.value == "nav":
+                                self._advance()
+                                label_tok = self._consume(TT.STRING, "Expected nav label")
+                                icon = ""
+                                comp = ""
+                                group = ""
+                                while not self._at_eol():
+                                    k = self._current()
+                                    if (k.type == TT.IDENTIFIER and
+                                            self._pos + 1 < len(self._tokens) and
+                                            self._tokens[self._pos + 1].type == TT.ASSIGN):
+                                        key = self._advance().value
+                                        self._advance()  # =
+                                        val_tok = self._advance()
+                                        val = val_tok.value.strip('"')
+                                        if key == "icon":      icon = val
+                                        if key == "component": comp = val
+                                        if key == "group":     group = val
+                                    elif k.type == TT.IDENTIFIER:
+                                        comp = self._advance().value
+                                    else:
+                                        break
+                                self._consume_end()
+                                sidebar.append(ast.NavItem(
+                                    label=label_tok.value, icon=icon,
+                                    component=comp, group=group,
+                                    line=c.line, col=c.col,
+                                ))
+                            else:
+                                self._advance()
+                        if self._check(TT.DEDENT): self._advance()
+
+                # tabs block
+                elif cur.type == TT.IDENTIFIER and cur.value == "tabs":
+                    self._advance(); self._consume_end()
+                    self._skip_newlines()
+                    if self._check(TT.INDENT):
+                        self._advance()
+                        while not self._check(TT.DEDENT) and not self._at_end():
+                            self._skip_newlines()
+                            if self._check(TT.DEDENT): break
+                            c = self._current()
+                            if c.type == TT.IDENTIFIER and c.value == "tab":
+                                self._advance()
+                                label_tok = self._consume(TT.STRING, "Expected tab label")
+                                comp = ""
+                                if not self._at_eol() and self._current().type == TT.IDENTIFIER:
+                                    comp = self._advance().value
+                                self._consume_end()
+                                tabs.append(ast.TabItem(
+                                    label=label_tok.value, component=comp,
+                                    line=c.line, col=c.col,
+                                ))
+                            else:
+                                self._advance()
+                        if self._check(TT.DEDENT): self._advance()
+
+                # main block
+                elif cur.type == TT.IDENTIFIER and cur.value == "main":
+                    self._advance(); self._consume_end()
+                    self._skip_newlines()
+                    if self._check(TT.INDENT):
+                        self._advance()
+                        while not self._check(TT.DEDENT) and not self._at_end():
+                            self._skip_newlines()
+                            if self._check(TT.DEDENT): break
+                            c = self._current()
+                            if c.type == TT.IDENTIFIER:
+                                main.append(self._advance().value)
+                                self._consume_end()
+                            else:
+                                self._advance()
+                        if self._check(TT.DEDENT): self._advance()
+
+                # routes block
+                elif cur.type == TT.IDENTIFIER and cur.value == "routes":
+                    self._advance(); self._consume_end()
+                    self._skip_newlines()
+                    if self._check(TT.INDENT):
+                        self._advance()
+                        routes_list: List[ast.RouteItem] = []
+                        while not self._check(TT.DEDENT) and not self._at_end():
+                            self._skip_newlines()
+                            if self._check(TT.DEDENT): break
+                            c = self._current()
+                            if c.type == TT.ROUTE:
+                                self._advance()
+                                path_tok = self._consume(TT.STRING, "Expected route path string")
+                                comp = ""
+                                if not self._at_eol() and self._current().type == TT.IDENTIFIER:
+                                    comp = self._advance().value
+                                self._consume_end()
+                                routes_list.append(ast.RouteItem(
+                                    path=path_tok.value, component=comp,
+                                    line=c.line, col=c.col,
+                                ))
+                            else:
+                                self._advance()
+                        if self._check(TT.DEDENT): self._advance()
+                        # Attach routes to layout; store temporarily
+                        main.extend([f"__route__:{r.path}:{r.component}" for r in routes_list])
+
+                else:
+                    self._advance()
+
+            if self._check(TT.DEDENT):
+                self._advance()
+
+        # Extract route markers back out
+        routes: List[ast.RouteItem] = []
+        clean_main: List[str] = []
+        for entry in main:
+            if entry.startswith("__route__:"):
+                _, path, comp = entry.split(":", 2)
+                routes.append(ast.RouteItem(path=path, component=comp))
+            else:
+                clean_main.append(entry)
+
+        return ast.LayoutBlock(
+            sidebar=sidebar, tabs=tabs, main=clean_main, routes=routes,
+        )
+
+
+    def _include_stmt(self) -> ast.IncludeStmt:
+        """include "path/to/file.mcn" """
+        tok = self._advance()   # consume INCLUDE
+        path_tok = self._consume(TT.STRING, "Expected file path string after 'include'")
+        self._consume_end()
+        return ast.IncludeStmt(path=path_tok.value, line=tok.line, col=tok.col)
+
+
+# ── Backward-compat alias ──────────────────────────────────────────────────────
+MCNParser = Parser

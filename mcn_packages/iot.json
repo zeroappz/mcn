@@ -1,0 +1,13 @@
+{
+  "name": "iot",
+  "version": "3.0.0",
+  "description": "IoT device connectivity and management",
+  "dependencies": [
+    "events"
+  ],
+  "functions": [
+    "register",
+    "read",
+    "command"
+  ]
+}

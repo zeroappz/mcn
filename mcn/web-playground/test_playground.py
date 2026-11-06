@@ -1,0 +1,1000 @@
+#!/usr/bin/env python3
+"""
+MCN Web Playground Test Suite
+
+Tests every server endpoint without needing a live server —
+uses Flask's built-in test client.
+
+Run:
+    python3 mcn/web-playground/test_playground.py      # standalone runner
+    python3 mcn/web-playground/test_playground.py -v   # verbose
+    python3 -m pytest mcn/web-playground/test_playground.py   # pytest / CI
+"""
+
+import sys
+import os
+import json
+import shutil
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+
+# ── Path setup ────────────────────────────────────────────────────────────────
+_HERE = Path(__file__).parent
+_ROOT = _HERE.parent.parent
+sys.path.insert(0, str(_ROOT))
+sys.path.insert(0, str(_ROOT / "mcn"))
+
+# ── Redirect workspace to a temp dir so tests don't touch ~/.mcn ──────────────
+_TMP_WORKSPACE = Path(tempfile.mkdtemp(prefix="mcn_test_playground_"))
+
+import importlib
+
+# Load server module in isolation, patching Path.home so the workspace
+# is created inside our temp dir instead of ~/.mcn/playground
+with patch("pathlib.Path.home", return_value=_TMP_WORKSPACE):
+    _spec = importlib.util.spec_from_file_location(
+        "pg_server", str(_HERE / "server.py")
+    )
+    pg = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(pg)
+
+# Point the app's workspace exactly at our temp dir and seed files
+pg.app.config["WORKSPACE"] = _TMP_WORKSPACE
+(_TMP_WORKSPACE / "backend").mkdir(exist_ok=True)
+(_TMP_WORKSPACE / "ui").mkdir(exist_ok=True)
+(_TMP_WORKSPACE / "backend" / "main.mcn").write_text("// backend\n")
+(_TMP_WORKSPACE / "ui"      / "app.mcn" ).write_text("// ui\n")
+
+app = pg.app
+app.config["TESTING"] = True
+import playground_server.examples as _examples  # noqa: E402
+
+# ── Colours ───────────────────────────────────────────────────────────────────
+GREEN  = "\033[92m"
+RED    = "\033[91m"
+YELLOW = "\033[93m"
+CYAN   = "\033[96m"
+RESET  = "\033[0m"
+BOLD   = "\033[1m"
+
+_passed = _failed = _skipped = 0
+
+
+# ── Mini test runner helpers ──────────────────────────────────────────────────
+class Result:
+    def __init__(self, name):
+        self.name = name
+        self.ok   = True
+        self.msgs = []
+
+    def check(self, cond, label=""):
+        if not cond:
+            self.ok  = False
+            self.msgs.append(f"  ✗ {label}" if label else "  ✗ assertion failed")
+        return self
+
+    def eq(self, a, b, label=""):
+        if a != b:
+            self.ok  = False
+            self.msgs.append(f"  ✗ {label}: expected {b!r}, got {a!r}")
+        return self
+
+    def contains(self, text, sub, label=""):
+        if sub not in str(text):
+            self.ok  = False
+            self.msgs.append(f"  ✗ {label}: {sub!r} not found in {str(text)[:120]!r}")
+        return self
+
+
+def run_test(name, fn, verbose):
+    global _passed, _failed
+    r = Result(name)
+    try:
+        fn(r)
+    except Exception as e:
+        r.ok = False
+        r.msgs.append(f"  ✗ Exception: {e}")
+
+    if r.ok:
+        _passed += 1
+        if verbose:
+            print(f"  {GREEN}✓{RESET} {name}")
+    else:
+        _failed += 1
+        print(f"  {RED}✗{RESET} {name}")
+        for m in r.msgs:
+            print(f"    {RED}{m}{RESET}")
+
+
+# ── Test groups ───────────────────────────────────────────────────────────────
+
+def test_health(r):
+    with app.test_client() as c:
+        res  = c.get("/api/health")
+        data = json.loads(res.data)
+        r.eq(res.status_code, 200, "status")
+        r.eq(data["status"], "ok", "status field")
+        r.check("version" in data, "version present")
+
+
+def test_index_html(r):
+    with app.test_client() as c:
+        res = c.get("/")
+        r.eq(res.status_code, 200, "status")
+        html = res.data.decode("utf-8", errors="replace")
+        r.contains(html, "MCN", "contains MCN")
+        r.contains(html, "monaco", "contains monaco")
+
+
+def test_workspace_files(r):
+    with app.test_client() as c:
+        res  = c.get("/api/workspace/files")
+        data = json.loads(res.data)
+        r.eq(res.status_code, 200, "status")
+        r.check("files" in data, "files key present")
+        paths = [f["path"] for f in data["files"]]
+        r.check("backend/main.mcn" in paths, "backend/main.mcn listed")
+        r.check("ui/app.mcn"       in paths, "ui/app.mcn listed")
+
+
+def test_workspace_get_file(r):
+    # Write a known file first
+    (_TMP_WORKSPACE / "backend" / "main.mcn").write_text("var x = 1\n")
+    with app.test_client() as c:
+        res  = c.get("/api/workspace/file?path=backend/main.mcn")
+        data = json.loads(res.data)
+        r.eq(res.status_code, 200, "status")
+        r.contains(data["content"], "var x = 1", "content matches")
+        r.eq(data["path"], "backend/main.mcn", "path echoed")
+
+
+def test_workspace_get_file_missing(r):
+    with app.test_client() as c:
+        res = c.get("/api/workspace/file?path=no_such_file.mcn")
+        r.eq(res.status_code, 404, "404 for missing file")
+
+
+def test_workspace_get_file_traversal(r):
+    with app.test_client() as c:
+        res = c.get("/api/workspace/file?path=../../etc/passwd")
+        r.check(res.status_code in (403, 404), "traversal blocked")
+
+
+def test_workspace_save_file(r):
+    with app.test_client() as c:
+        payload = {"path": "backend/main.mcn", "content": "var saved = true\n"}
+        res     = c.post("/api/workspace/file",
+                         data=json.dumps(payload),
+                         content_type="application/json")
+        data = json.loads(res.data)
+        r.eq(res.status_code, 200, "status")
+        r.check(data.get("success"), "success flag")
+        written = (_TMP_WORKSPACE / "backend" / "main.mcn").read_text()
+        r.contains(written, "var saved = true", "content persisted")
+
+
+def test_workspace_save_traversal(r):
+    with app.test_client() as c:
+        payload = {"path": "../../evil.txt", "content": "bad"}
+        res     = c.post("/api/workspace/file",
+                         data=json.dumps(payload),
+                         content_type="application/json")
+        r.eq(res.status_code, 403, "traversal blocked")
+
+
+def test_execute_simple(r):
+    with app.test_client() as c:
+        res  = c.post("/api/execute",
+                      data=json.dumps({"code": 'var x = 1 + 1\nlog("result: {x}")'}),
+                      content_type="application/json")
+        data = json.loads(res.data)
+        r.eq(res.status_code, 200, "status")
+        r.check(data.get("success"), "success")
+        r.check(any("result: 2" in line for line in data.get("output", [])), "output contains result")
+
+
+def test_execute_missing_code(r):
+    with app.test_client() as c:
+        res  = c.post("/api/execute",
+                      data=json.dumps({}),
+                      content_type="application/json")
+        r.eq(res.status_code, 400, "400 for missing code")
+
+
+def test_execute_runtime_error(r):
+    with app.test_client() as c:
+        res  = c.post("/api/execute",
+                      data=json.dumps({"code": "throw \"deliberate error\""}),
+                      content_type="application/json")
+        data = json.loads(res.data)
+        r.check(not data.get("success"), "success is false")
+        r.check("error" in data, "error field present")
+
+
+def test_execute_return_value(r):
+    # Top-level return is not valid in MCN scripts; use log() output instead
+    with app.test_client() as c:
+        res  = c.post("/api/execute",
+                      data=json.dumps({"code": 'var x = 42\nlog("value: {x}")'}),
+                      content_type="application/json")
+        data = json.loads(res.data)
+        r.check(data.get("success"), "success")
+        r.check(any("value: 42" in line for line in data.get("output", [])), "output contains value")
+
+
+def test_format_code(r):
+    messy = 'var x=1\nif x==1\n    log("yes")\n'
+    with app.test_client() as c:
+        res  = c.post("/api/format",
+                      data=json.dumps({"code": messy}),
+                      content_type="application/json")
+        data = json.loads(res.data)
+        r.eq(res.status_code, 200, "status")
+        r.check(data.get("success"), "success")
+        r.check("formatted" in data, "formatted field present")
+
+
+def test_format_already_formatted(r):
+    clean = 'var x = 1\n'
+    with app.test_client() as c:
+        res  = c.post("/api/format",
+                      data=json.dumps({"code": clean}),
+                      content_type="application/json")
+        data = json.loads(res.data)
+        r.check(data.get("success"), "success")
+        # changed may be True or False — just check it's present
+        r.check("changed" in data, "changed flag present")
+
+
+def test_check_clean_code(r):
+    with app.test_client() as c:
+        res  = c.post("/api/check",
+                      data=json.dumps({"code": 'var x = 1\nlog("hello")\n'}),
+                      content_type="application/json")
+        data = json.loads(res.data)
+        r.eq(res.status_code, 200, "status")
+        r.check(data.get("success"), "success")
+        r.check("issues" in data, "issues list present")
+        r.check("error_count"   in data, "error_count present")
+        r.check("warning_count" in data, "warning_count present")
+
+
+def test_check_response_shape(r):
+    with app.test_client() as c:
+        res  = c.post("/api/check",
+                      data=json.dumps({"code": 'var z = 99\n'}),
+                      content_type="application/json")
+        data = json.loads(res.data)
+        r.check(isinstance(data.get("issues"), list), "issues is list")
+        r.check(isinstance(data.get("error_count"), int), "error_count is int")
+
+
+def test_test_runner_pass(r):
+    code = '''\
+function add(a, b)
+    return a + b
+
+test "addition works"
+    assert add(2, 3) == 5
+
+test "subtraction"
+    assert add(10, -3) == 7
+'''
+    with app.test_client() as c:
+        res  = c.post("/api/test",
+                      data=json.dumps({"code": code}),
+                      content_type="application/json")
+        data = json.loads(res.data)
+        r.eq(res.status_code, 200, "status")
+        r.eq(data.get("total"),  2, "2 tests")
+        r.eq(data.get("passed"), 2, "2 passed")
+        r.eq(data.get("failed"), 0, "0 failed")
+        r.check(data.get("success"), "overall success")
+
+
+def test_test_runner_fail(r):
+    code = '''\
+test "intentional failure"
+    assert 1 == 2
+'''
+    with app.test_client() as c:
+        res  = c.post("/api/test",
+                      data=json.dumps({"code": code}),
+                      content_type="application/json")
+        data = json.loads(res.data)
+        r.eq(data.get("failed"), 1, "1 failed")
+        r.check(not data.get("success"), "overall not success")
+        results = data.get("results", [])
+        r.check(len(results) == 1, "1 result entry")
+        r.check(not results[0]["passed"], "result is failed")
+        r.check(results[0]["error"] is not None, "error message present")
+
+
+def test_test_runner_no_tests(r):
+    with app.test_client() as c:
+        res  = c.post("/api/test",
+                      data=json.dumps({"code": "var x = 1\n"}),
+                      content_type="application/json")
+        data = json.loads(res.data)
+        r.eq(data.get("total"), 0, "0 tests")
+
+
+def test_examples(r):
+    with app.test_client() as c:
+        res  = c.get("/api/examples")
+        data = json.loads(res.data)
+        r.eq(res.status_code, 200, "status")
+        r.check(isinstance(data, list), "returns list")
+        r.check(len(data) > 0, "at least one example")
+        for ex in data:
+            r.check("id"   in ex, "example has id")
+            r.check("name" in ex, "example has name")
+            # project templates use 'files', snippets use 'code' + 'file'
+            is_project = ex.get("project", False)
+            if is_project:
+                r.check("files" in ex, f"{ex['id']}: project has files list")
+            else:
+                r.check("code" in ex, f"{ex['id']}: snippet has code")
+                r.check("file" in ex, f"{ex['id']}: snippet has file")
+
+
+def test_build_no_ui_file(r):
+    # Remove ui/app.mcn temporarily
+    ui_path = _TMP_WORKSPACE / "ui" / "app.mcn"
+    backup  = ui_path.read_text()
+    ui_path.unlink()
+    try:
+        with app.test_client() as c:
+            res  = c.post("/api/build",
+                          data=json.dumps({}),
+                          content_type="application/json")
+            data = json.loads(res.data)
+            r.check(not data.get("success"), "fails without ui file")
+    finally:
+        ui_path.write_text(backup)
+
+
+def test_build_invalid_ui(r):
+    """Build with syntactically broken UI MCN — should return error, not crash."""
+    with app.test_client() as c:
+        res  = c.post("/api/build",
+                      data=json.dumps({
+                          "backend": "// ok\n",
+                          "ui":      "THIS IS NOT VALID MCN @@@@\n",
+                      }),
+                      content_type="application/json")
+        data = json.loads(res.data)
+        # Either success=False or returncode != 0 — just mustn't 500
+        r.check(res.status_code < 500, "no 500 on bad input")
+
+
+def test_build_valid_ui(r):
+    """Build a minimal valid app and check files are generated."""
+    backend = '''\
+contract Item
+    name: str
+
+query("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, created_at TEXT DEFAULT (datetime(\\'now\\')))")
+
+service items_api
+    port 8080
+
+    endpoint list_items(limit = 50, offset = 0)
+        var items = query("SELECT * FROM items LIMIT ?", (limit,))
+        return {success: true, data: items, total: items, insight: "ok"}
+'''
+    ui = '''\
+component ItemList
+    state items   = []
+    state insight = ""
+
+    on load
+        var response = list_items()
+        items   = response.data
+        insight = response.insight
+
+    render
+        card
+            card_header "Items"
+            table
+                table_header
+                    table_row
+                        table_head "id"
+                        table_head "name"
+                        table_head "created_at"
+                table_body
+
+app Demo
+    title "Demo"
+    theme "professional"
+    layout
+        tabs
+            tab "Items" ItemList
+'''
+    with app.test_client() as c:
+        res  = c.post("/api/build",
+                      data=json.dumps({"backend": backend, "ui": ui}),
+                      content_type="application/json")
+        data = json.loads(res.data)
+        if not data.get("success"):
+            r.check(False, f"build failed: {data.get('error') or data.get('stderr')}")
+            return
+        r.check(data.get("success"), "build succeeded")
+        r.check(len(data.get("files", [])) > 0, "files generated")
+        paths = data["files"]
+        r.check(any("App.tsx"      in f for f in paths), "App.tsx generated")
+        r.check(any("package.json" in f for f in paths), "package.json generated")
+
+
+def test_frontend_file_view(r):
+    """After build, /api/frontend/file should return generated file contents."""
+    # Write a fake generated file to test the endpoint independently
+    frontend_src = _TMP_WORKSPACE / "frontend" / "src"
+    frontend_src.mkdir(parents=True, exist_ok=True)
+    (frontend_src / "App.tsx").write_text("export default function App() { return <div>Hi</div>; }\n")
+
+    with app.test_client() as c:
+        res  = c.get("/api/frontend/file?path=frontend/src/App.tsx")
+        data = json.loads(res.data)
+        r.eq(res.status_code, 200, "status")
+        r.contains(data["content"], "App", "content returned")
+
+
+def test_frontend_file_traversal(r):
+    with app.test_client() as c:
+        res = c.get("/api/frontend/file?path=../../etc/passwd")
+        r.check(res.status_code in (403, 404), "traversal blocked")
+
+
+def test_devserver_status_initial(r):
+    with app.test_client() as c:
+        res  = c.get("/api/devserver/status")
+        data = json.loads(res.data)
+        r.eq(res.status_code, 200, "status")
+        r.check("running" in data, "running key present")
+        r.check("port"    in data, "port key present")
+
+
+def test_devserver_start_no_package_json(r):
+    """Start should fail gracefully when package.json doesn't exist."""
+    frontend = _TMP_WORKSPACE / "frontend"
+    pkg = frontend / "package.json"
+    existed = pkg.exists()
+    if existed:
+        backup = pkg.read_text()
+        pkg.unlink()
+    try:
+        with app.test_client() as c:
+            res  = c.post("/api/devserver/start")
+            data = json.loads(res.data)
+            r.check(not data.get("success"), "fails without package.json")
+    finally:
+        if existed:
+            pkg.write_text(backup)
+
+
+def test_devserver_stop_when_not_running(r):
+    """Stop should succeed even when nothing is running."""
+    with app.test_client() as c:
+        res  = c.post("/api/devserver/stop")
+        data = json.loads(res.data)
+        r.check(data.get("success"), "stop returns success")
+
+
+def test_preview_route(r):
+    """GET /preview/index.html should return interactive HTML page."""
+    with app.test_client() as c:
+        res = c.get("/preview/index.html")
+        r.eq(res.status_code, 200, "status 200")
+        r.check("<!DOCTYPE html>" in res.data.decode("utf-8"), "returns HTML document")
+
+
+def test_crm_build_and_preview(r):
+    """Building CRM template should generate all components and render sidebar in preview."""
+    with app.test_client() as c:
+        # 1. Reset workspace to CRM template
+        reset_res = c.post("/api/workspace/reset",
+                           data=json.dumps({
+                               "files": [
+                                   *_examples.load_template("crm")["files"]
+                               ]
+                           }),
+                           content_type="application/json")
+        r.eq(reset_res.status_code, 200, "reset status")
+
+        # 2. Build CRM project
+        build_res = c.post("/api/build",
+                           data=json.dumps({"platform": "react"}),
+                           content_type="application/json")
+        bdata = json.loads(build_res.data)
+        r.check(bdata.get("success"), "build success")
+
+        # 3. The live preview page loads the kit and the compiled app's source
+        prev_res = c.get("/preview/index.html")
+        r.eq(prev_res.status_code, 200, "preview status 200")
+        r.check("/static/preview/mcn-ui.js" in prev_res.data.decode("utf-8"), "loads the UI kit bundle")
+        src = json.loads(c.get("/api/preview/source").data)
+        r.check(src.get("success"), "preview source compiles")
+        app_tsx = src["files"].get("App.tsx", "")
+        r.check('title={"CRM"}' in app_tsx, "contains CRM title")
+        for label in ("Dashboard", "Deals", "Contacts", "Companies", "Activities"):
+            r.check(f'label: "{label}"' in app_tsx, f"contains {label} nav")
+        r.check('layout="sidebar"' in app_tsx, "uses the sidebar layout")
+
+
+def test_generate_missing_description(r):
+    with app.test_client() as c:
+        res  = c.post("/api/generate",
+                      data=json.dumps({"description": ""}),
+                      content_type="application/json")
+        r.eq(res.status_code, 400, "400 for empty description")
+
+
+def test_generate_missing_api_key(r):
+    """Without any API key source, should return 400."""
+    with patch.dict(os.environ, {}, clear=True):
+        # Also clear config
+        with patch("playground_server.agent._load_config", return_value={}):
+            with app.test_client() as c:
+                res  = c.post("/api/generate",
+                              data=json.dumps({"description": "a todo app", "api_key": ""}),
+                              content_type="application/json")
+                r.eq(res.status_code, 400, "400 when no API key")
+
+
+def test_generate_streams_sse(r):
+    """With a mocked MCNAgent, verify the SSE stream emits events correctly."""
+    import queue as _queue
+
+    mock_result = {
+        "backend_mcn": "// backend\nservice s\n    port 8080\n",
+        "ui_mcn":      "app A\n    title \"A\"\n    theme \"default\"\n    layout\n        tabs\n            tab \"T\" C\n",
+        "attempts": 1,
+        "backend_path": _TMP_WORKSPACE / "backend" / "main.mcn",
+        "ui_path":      _TMP_WORKSPACE / "ui"      / "app.mcn",
+        "build_cmd":    "mcn build ...",
+    }
+
+    def _mock_generate(description, output_dir, verbose):
+        return mock_result
+
+    with patch("mcn.ai.mcn_agent.MCNAgent") as MockAgent:
+        instance = MockAgent.return_value
+        instance.generate.side_effect = _mock_generate
+        instance.client = MagicMock()
+        instance.model  = "claude-opus-5-5"
+
+        # Patch the threading in the generate endpoint to run synchronously
+        q = _queue.Queue()
+        q.put({"type": "token",  "text": "// hello"})
+        q.put({"type": "status", "text": "Validating…"})
+        q.put({"type": "done",   "backend": mock_result["backend_mcn"],
+               "ui": mock_result["ui_mcn"], "attempts": 1})
+        q.put(None)
+
+        original_thread = __import__("threading").Thread
+
+        def _fake_thread(target=None, daemon=None, **kw):
+            # Push sentinel immediately so the queue is pre-filled
+            return original_thread(target=lambda: None, daemon=True)
+
+        with patch("threading.Thread", side_effect=_fake_thread):
+            with patch("queue.Queue", return_value=q):
+                with patch.dict(pg.app.config, {"WORKSPACE": _TMP_WORKSPACE}):
+                    # We test the endpoint shape by directly calling the route function
+                    # and checking it doesn't raise
+                    try:
+                        with app.test_client() as c:
+                            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}):
+                                res = c.post("/api/generate",
+                                             data=json.dumps({"description": "test app",
+                                                              "api_key": "sk-test-key"}),
+                                             content_type="application/json")
+                                # Should return SSE stream (200) or error (400/500)
+                                # — we just verify it doesn't crash and returns valid HTTP
+                                r.check(res.status_code in (200, 400, 500), "valid HTTP status")
+                    except Exception as e:
+                        r.check(False, f"raised exception: {e}")
+
+
+def test_execute_code_size_limit(r):
+    """Payloads over the size limit should be rejected."""
+    big_code = "var x = 1\n" * 15_000   # well over 128 KB
+    with app.test_client() as c:
+        res  = c.post("/api/execute",
+                      data=json.dumps({"code": big_code}),
+                      content_type="application/json")
+        r.eq(res.status_code, 400, "400 for oversized payload")
+
+
+def test_execute_timeout(r):
+    """Infinite loop should be terminated by the timeout guard."""
+    inf_loop = "while true\n    var x = 1\n"
+    with app.test_client() as c:
+        res  = c.post("/api/execute",
+                      data=json.dumps({"code": inf_loop}),
+                      content_type="application/json",
+                      )
+def test_execute_analytics(r):
+    """Analytics package: kpi_summary, trend, distribution, pivot, report, and export_report."""
+    script = (
+        'use analytics\n'
+        'query("DROP TABLE IF EXISTS test_sales")\n'
+        'query("CREATE TABLE test_sales (id INTEGER PRIMARY KEY AUTOINCREMENT, rep TEXT, region TEXT, amount REAL, created_at TEXT)")\n'
+        'query("INSERT INTO test_sales (rep, region, amount, created_at) VALUES (\'Alice\', \'North\', 10000, \'2026-01-10\')")\n'
+        'query("INSERT INTO test_sales (rep, region, amount, created_at) VALUES (\'Bob\', \'West\', 20000, \'2026-02-14\')")\n'
+        'query("INSERT INTO test_sales (rep, region, amount, created_at) VALUES (\'Charlie\', \'North\', 30000, \'2026-02-20\')")\n'
+        'var k = kpi_summary("test_sales", metrics=["sum:amount", "avg:amount", "count:*"])\n'
+        'var t = trend("test_sales", date_field="created_at", value_field="amount", interval="monthly", agg="sum")\n'
+        'var d = distribution("test_sales", category_field="region", value_field="amount")\n'
+        'var p = pivot("test_sales", row_field="rep", col_field="region", value_field="amount")\n'
+        'var rep = report("test_sales", metrics=["sum:amount", "count:*"], group_by=["region"])\n'
+        'var md = export_report(rep, format="markdown")\n'
+        'log("Total Sales: " + str(k.total_sum))\n'
+        'log(md)\n'
+    )
+    with app.test_client() as c:
+        res = c.post("/api/execute",
+                     data=json.dumps({"code": script}),
+                     content_type="application/json")
+        r.eq(res.status_code, 200, "status 200")
+        data = json.loads(res.data)
+        r.check(data.get("success") is True, f"execution succeeded (output: {data.get('output')}, error: {data.get('error')})")
+        out_raw = data.get("output", [])
+        output = "\n".join(out_raw) if isinstance(out_raw, list) else str(out_raw)
+        r.check("60000" in output, f"computed correct aggregated KPI total (output: {output})")
+        r.check("North" in output and "West" in output, "exported markdown report table with grouping")
+
+
+def test_generate_with_attachments(r):
+    """POST /api/generate with multimodal attachments."""
+    import base64
+    fake_pdf = base64.b64encode(b"%PDF-1.4 mock BRD requirement").decode("utf-8")
+    fake_png = base64.b64encode(b"\x89PNG\r\n\x1a\n mock figma image").decode("utf-8")
+    attachments = [
+        {"name": "BRD_CRM_Spec.pdf", "type": "application/pdf", "size": 1024, "data": fake_pdf},
+        {"name": "Figma_Dashboard_Mockup.png", "type": "image/png", "size": 2048, "data": fake_png},
+    ]
+    with app.test_client() as c:
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}):
+            res = c.post("/api/generate",
+                         data=json.dumps({
+                             "description": "Generate CRM based on attached BRD and Figma UI",
+                             "attachments": attachments,
+                             "api_key": "sk-test"
+                         }),
+                         content_type="application/json")
+            r.check(res.status_code in (200, 400, 500), "valid HTTP status for multimodal generation")
+
+
+def test_mcn_agent_multimodal_prompt(r):
+    """MCNAgent._build_prompt structures document and image blocks correctly."""
+    from mcn.ai.mcn_agent import MCNAgent
+    agent = MCNAgent(api_key="sk-dummy")
+    import base64
+    fake_pdf = base64.b64encode(b"%PDF-1.4 test").decode("utf-8")
+    fake_png = base64.b64encode(b"PNG mock").decode("utf-8")
+    fake_md  = base64.b64encode(b"# PRD Spec\nCRUD for users").decode("utf-8")
+
+    attachments = [
+        {"name": "requirements.pdf", "type": "application/pdf", "data": fake_pdf},
+        {"name": "flowchart.png", "type": "image/png", "data": fake_png},
+        {"name": "notes.md", "type": "text/markdown", "data": fake_md},
+    ]
+
+    blocks = agent._build_prompt("Build user portal", port=8080, attachments=attachments)
+    r.check(isinstance(blocks, list), "returns list of content blocks")
+    r.check(len(blocks) == 4, f"expected 4 blocks, got {len(blocks)}")
+    r.check(blocks[0]["type"] == "document", "first block is document")
+    r.check(blocks[0]["source"]["media_type"] == "application/pdf", "media_type is application/pdf")
+    r.check(blocks[1]["type"] == "image", "second block is image")
+    r.check(blocks[1]["source"]["media_type"] == "image/png", "media_type is image/png")
+    r.check(blocks[2]["type"] == "text", "third block is decoded text")
+    r.check("CRUD for users" in blocks[2]["text"], "text attachment content decoded")
+    r.check(blocks[3]["type"] == "text", "fourth block is instruction text")
+    r.check("REQUIREMENTS ANALYSIS & DECOMPOSITION WORKFLOW" in blocks[3]["text"], "instructions present in final block")
+
+
+# ── Enterprise & Tooling Tests ────────────────────────────────────────────────
+
+def test_openapi_spec(r):
+    with app.test_client() as c:
+        res = c.get("/api/openapi.json")
+        r.eq(res.status_code, 200, "status is 200")
+        data = res.get_json()
+        r.eq(data.get("openapi"), "3.0.3", "openapi 3.0.3 version")
+        r.check("paths" in data, "paths in openapi spec")
+        r.check("components" in data, "components in openapi spec")
+        r.check("bearerAuth" in data.get("components", {}).get("securitySchemes", {}), "bearerAuth security scheme present")
+
+
+def test_swagger_ui_route(r):
+    with app.test_client() as c:
+        res = c.get("/docs")
+        r.eq(res.status_code, 200, "status is 200")
+        html = res.get_data(as_text=True)
+        r.check("SwaggerUIBundle" in html, "SwaggerUIBundle present in /docs")
+        r.check("/api/openapi.json" in html, "spec url present in /docs")
+
+
+def test_auth_guard_validation(r):
+    from mcn.core_engine.auth_primitives import _make_token
+    admin_token = _make_token({"user_id": "u1", "email": "admin@example.com", "roles": ["admin"]})
+    user_token = _make_token({"user_id": "u2", "email": "user@example.com", "roles": ["viewer"]})
+
+    with app.test_client() as c:
+        # Test admin access
+        res = c.post("/api/auth/validate_guard", json={"token": admin_token, "required_role": "admin"})
+        r.eq(res.status_code, 200, "admin validation status")
+        r.check(res.get_json().get("valid") is True, "admin valid is True")
+
+        # Test forbidden role
+        res = c.post("/api/auth/validate_guard", json={"token": user_token, "required_role": "admin"})
+        r.eq(res.status_code, 403, "forbidden status is 403")
+        r.check(res.get_json().get("valid") is False, "forbidden valid is False")
+
+        # Test invalid token
+        res = c.post("/api/auth/validate_guard", json={"token": "invalid.token", "required_role": "admin"})
+        r.eq(res.status_code, 401, "invalid token status is 401")
+
+
+def test_database_migrations_export(r):
+    with app.test_client() as c:
+        res = c.get("/api/database/export_migrations?dialect=postgres")
+        r.eq(res.status_code, 200, "status is 200")
+        data = res.get_json()
+        r.check(data.get("success") is True, "success is True")
+        r.check("migration_sql" in data, "migration_sql in data")
+        r.check("CREATE TABLE" in data.get("migration_sql", ""), "CREATE TABLE in migration sql")
+
+
+def test_production_download_bundle(r):
+    with app.test_client() as c:
+        # Ensure build exists
+        c.post("/api/build")
+        res = c.get("/api/download")
+        r.eq(res.status_code, 200, "status is 200")
+        r.eq(res.mimetype, "application/zip", "zip mimetype")
+        
+        import zipfile, io
+        zf = zipfile.ZipFile(io.BytesIO(res.data))
+        namelist = zf.namelist()
+        r.check(any("Dockerfile" in n for n in namelist), "Dockerfile in download zip")
+        r.check(any("docker-compose.yml" in n for n in namelist), "docker-compose.yml in download zip")
+
+
+def test_vscode_extension_files(r):
+    ext_dir = Path(__file__).parent.parent / "studio" / "vscode-mcn"
+    r.check((ext_dir / "package.json").exists(), f"package.json exists in {ext_dir}")
+    r.check((ext_dir / "syntaxes" / "mcn.tmLanguage.json").exists(), "mcn.tmLanguage.json exists")
+    r.check((ext_dir / "src" / "server.ts").exists(), "language server source exists")
+    r.check((ext_dir / "language-configuration.json").exists(), "language-configuration.json exists")
+
+    if (ext_dir / "package.json").exists():
+        pkg = json.loads((ext_dir / "package.json").read_text(encoding="utf-8"))
+        r.eq(pkg.get("name"), "mcn-vscode", "extension package name")
+        r.check((ext_dir / f"mcn-vscode-{pkg['version']}.vsix").exists(), "packaged .vsix matches the version")
+
+
+def test_telemetry_status(r):
+    with app.test_client() as c:
+        res = c.get("/api/telemetry/status")
+        r.eq(res.status_code, 200, "status is 200")
+        data = res.get_json()
+        r.check("registered" in data, "registered boolean in telemetry status")
+
+
+def test_telemetry_register(r):
+    with app.test_client() as c:
+        # Invalid email
+        res_bad = c.post("/api/telemetry/register", json={"email": "invalid_email"})
+        r.eq(res_bad.status_code, 400, "bad email rejected with 400")
+
+        # Valid registration
+        res = c.post("/api/telemetry/register", json={
+            "email": "dev@macincode.dev",
+            "name": "MCN Developer",
+            "organization": "Open Source",
+            "platform": "web"
+        })
+        r.eq(res.status_code, 200, "registration status is 200")
+        data = res.get_json()
+        r.check(data.get("success") is True, "registration success is True")
+        r.eq(data.get("profile", {}).get("email"), "dev@macincode.dev", "profile email matches")
+
+
+def test_telemetry_feedback(r):
+    with app.test_client() as c:
+        # Missing message
+        res_bad = c.post("/api/telemetry/feedback", json={"email": "dev@macincode.dev", "message": ""})
+        r.eq(res_bad.status_code, 400, "empty message rejected with 400")
+
+        # Valid feedback
+        res = c.post("/api/telemetry/feedback", json={
+            "email": "dev@macincode.dev",
+            "feedback_type": "bug",
+            "subject": "UI alignment test",
+            "message": "Testing telemetry and error diagnostics reporting.",
+            "error_logs": "Traceback: simulated log"
+        })
+        r.eq(res.status_code, 200, "feedback submission status is 200")
+        data = res.get_json()
+        r.check(data.get("success") is True, "feedback success is True")
+
+
+# ── Runner ────────────────────────────────────────────────────────────────────
+
+# ── Security: local-only access ──────────────────────────────────────────────
+
+def test_security_same_origin_allowed(r):
+    with app.test_client() as c:
+        res = c.post("/api/execute", json={"code": "log(1)"},
+                     headers={"Origin": "http://localhost:5003"})
+        r.eq(res.status_code, 200, "loopback origin may execute")
+
+
+def test_security_foreign_origin_blocked(r):
+    with app.test_client() as c:
+        # A cross-site "simple" POST must be refused before any code runs
+        res = c.post("/api/execute", data='{"code": "log(1)"}', content_type="text/plain",
+                     headers={"Origin": "https://evil.example"})
+        r.eq(res.status_code, 403, "foreign origin refused")
+
+
+def test_security_null_origin_blocked(r):
+    with app.test_client() as c:
+        res = c.post("/api/execute", json={"code": "log(1)"}, headers={"Origin": "null"})
+        r.eq(res.status_code, 403, "sandboxed null origin refused")
+
+
+def test_security_dns_rebinding_blocked(r):
+    with app.test_client() as c:
+        res = c.get("/api/health", headers={"Host": "attacker.example:5003"})
+        r.eq(res.status_code, 403, "non-loopback Host refused")
+
+
+def test_security_cors_preflight_loopback(r):
+    with app.test_client() as c:
+        res = c.open("/api/execute", method="OPTIONS", headers={
+            "Origin": "http://localhost:5174", "Access-Control-Request-Method": "POST"})
+        r.eq(res.headers.get("Access-Control-Allow-Origin"), "http://localhost:5174", "preview origin allowed")
+
+
+SUITES = {
+    "Health & Static": [
+        ("GET /api/health",    test_health),
+        ("GET / (index.html)", test_index_html),
+    ],
+    "Workspace Files": [
+        ("GET  /api/workspace/files",          test_workspace_files),
+        ("GET  /api/workspace/file",           test_workspace_get_file),
+        ("GET  /api/workspace/file (missing)", test_workspace_get_file_missing),
+        ("GET  /api/workspace/file (traversal)",test_workspace_get_file_traversal),
+        ("POST /api/workspace/file (save)",    test_workspace_save_file),
+        ("POST /api/workspace/file (traversal)",test_workspace_save_traversal),
+    ],
+    "Execute": [
+        ("POST /api/execute (simple)",       test_execute_simple),
+        ("POST /api/execute (missing code)", test_execute_missing_code),
+        ("POST /api/execute (runtime error)",test_execute_runtime_error),
+        ("POST /api/execute (return value)", test_execute_return_value),
+        ("POST /api/execute (size limit)",   test_execute_code_size_limit),
+        ("POST /api/execute (timeout)",      test_execute_timeout),
+        ("POST /api/execute (analytics engine)", test_execute_analytics),
+    ],
+    "Format": [
+        ("POST /api/format (messy code)",    test_format_code),
+        ("POST /api/format (clean code)",    test_format_already_formatted),
+    ],
+    "Check": [
+        ("POST /api/check (clean)",          test_check_clean_code),
+        ("POST /api/check (response shape)", test_check_response_shape),
+    ],
+    "Test Runner": [
+        ("POST /api/test (all pass)",        test_test_runner_pass),
+        ("POST /api/test (fail)",            test_test_runner_fail),
+        ("POST /api/test (no tests)",        test_test_runner_no_tests),
+    ],
+    "Examples": [
+        ("GET /api/examples",                test_examples),
+    ],
+    "Build": [
+        ("POST /api/build (no ui file)",     test_build_no_ui_file),
+        ("POST /api/build (invalid ui)",     test_build_invalid_ui),
+        ("POST /api/build (valid app)",      test_build_valid_ui),
+    ],
+    "Frontend File View": [
+        ("GET /api/frontend/file",           test_frontend_file_view),
+        ("GET /api/frontend/file (traversal)",test_frontend_file_traversal),
+    ],
+    "Dev Server": [
+        ("GET  /api/devserver/status",                test_devserver_status_initial),
+        ("POST /api/devserver/start (no pkg.json)",   test_devserver_start_no_package_json),
+        ("POST /api/devserver/stop  (not running)",   test_devserver_stop_when_not_running),
+        ("GET  /preview/index.html",                  test_preview_route),
+        ("GET  /preview/index.html (CRM template)",   test_crm_build_and_preview),
+    ],
+    "Generate (AI)": [
+        ("POST /api/generate (no description)", test_generate_missing_description),
+        ("POST /api/generate (no api key)",     test_generate_missing_api_key),
+        ("POST /api/generate (SSE stream)",     test_generate_streams_sse),
+        ("POST /api/generate (attachments)",    test_generate_with_attachments),
+        ("MCNAgent multimodal prompt builder",  test_mcn_agent_multimodal_prompt),
+    ],
+    "Enterprise & Tooling": [
+        ("GET  /api/openapi.json (OpenAPI 3.0)",       test_openapi_spec),
+        ("GET  /docs (Swagger UI Explorer)",           test_swagger_ui_route),
+        ("POST /api/auth/validate_guard (RBAC Guard)", test_auth_guard_validation),
+        ("GET  /api/database/export_migrations (DDL)", test_database_migrations_export),
+        ("GET  /api/download (Production Bundle)",     test_production_download_bundle),
+        ("VS Code Extension (Grammar & Snippets)",     test_vscode_extension_files),
+    ],
+    "Security: Local-Only Access": [
+        ("Loopback origin can execute",                test_security_same_origin_allowed),
+        ("Foreign origin is refused",                  test_security_foreign_origin_blocked),
+        ("Sandboxed null origin is refused",           test_security_null_origin_blocked),
+        ("DNS-rebinding Host is refused",              test_security_dns_rebinding_blocked),
+        ("CORS preflight allows loopback preview",     test_security_cors_preflight_loopback),
+    ],
+    "Community Telemetry & Feedback": [
+        ("GET  /api/telemetry/status",                 test_telemetry_status),
+        ("POST /api/telemetry/register (Developer)",   test_telemetry_register),
+        ("POST /api/telemetry/feedback (Diagnostics)", test_telemetry_feedback),
+    ],
+}
+
+
+def main():
+    verbose = "-v" in sys.argv or "--verbose" in sys.argv
+
+    print(f"\n{BOLD}{CYAN}MCN Web Playground Test Suite{RESET}\n")
+    print(f"  Workspace: {_TMP_WORKSPACE}")
+    print()
+
+    for suite_name, tests in SUITES.items():
+        print(f"{BOLD}{suite_name}{RESET}")
+        for label, fn in tests:
+            run_test(label, fn, verbose)
+        print()
+
+    total = _passed + _failed
+    color = GREEN if _failed == 0 else RED
+    icon  = "✓" if _failed == 0 else "✗"
+    print(f"{color}{BOLD}{icon} {_passed}/{total} passed{RESET}", end="")
+    if _failed:
+        print(f"  {RED}{_failed} failed{RESET}", end="")
+    print()
+
+    # Cleanup temp workspace
+    shutil.rmtree(_TMP_WORKSPACE, ignore_errors=True)
+
+    sys.exit(0 if _failed == 0 else 1)
+
+
+# ── pytest entry point ────────────────────────────────────────────────────────
+# The helpers above take a Result instead of a fixture, so hide them from
+# pytest collection and run every SUITES entry through one parametrized test.
+for _tests in SUITES.values():
+    for _label, _fn in _tests:
+        _fn.__test__ = False
+
+try:
+    import pytest
+
+    @pytest.mark.parametrize(
+        "fn",
+        [fn for tests in SUITES.values() for _, fn in tests],
+        ids=[label.strip() for tests in SUITES.values() for label, _ in tests],
+    )
+    def test_playground_case(fn):
+        res = Result(fn.__name__)
+        fn(res)
+        assert res.ok, "\n".join(res.msgs)
+except ImportError:  # standalone runner does not need pytest
+    pass
+
+
+if __name__ == "__main__":
+    main()

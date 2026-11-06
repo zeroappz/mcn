@@ -1,0 +1,11 @@
+{
+  "name": "events",
+  "version": "3.0.0",
+  "description": "Event-driven programming system",
+  "dependencies": [],
+  "functions": [
+    "on",
+    "trigger",
+    "emit"
+  ]
+}

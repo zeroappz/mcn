@@ -1,0 +1,13 @@
+{
+  "name": "agents",
+  "version": "3.0.0",
+  "description": "Autonomous AI agents",
+  "dependencies": [
+    "ai_v3"
+  ],
+  "functions": [
+    "create",
+    "activate",
+    "think"
+  ]
+}

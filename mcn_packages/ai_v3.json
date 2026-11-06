@@ -1,0 +1,12 @@
+{
+  "name": "ai_v3",
+  "version": "3.0.0",
+  "description": "Advanced AI model management and fine-tuning",
+  "dependencies": [],
+  "functions": [
+    "register",
+    "set_model",
+    "run",
+    "train"
+  ]
+}

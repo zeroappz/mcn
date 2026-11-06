@@ -1,7 +1,6 @@
 import requests
 import sqlite3
-import psycopg2
-import pymongo
+import threading
 import json
 import os
 import smtplib
@@ -14,6 +13,45 @@ from email.mime.multipart import MIMEMultipart
 import logging
 
 
+
+_db_lock = threading.RLock()
+
+
+def _runtime_log_path() -> str:
+    try:
+        from .paths import mcn_home
+    except ImportError:
+        from paths import mcn_home
+    return str(mcn_home("logs") / "runtime.log")
+
+
+def _http_timeout():
+    """(connect, read) seconds for trigger(). A host that never answers fails
+    in 5s instead of hanging; MCN_HTTP_TIMEOUT overrides both."""
+    if os.environ.get("MCN_HTTP_TIMEOUT"):
+        return float(os.environ["MCN_HTTP_TIMEOUT"])
+    return (5, 30)
+
+def _pg_placeholders(sql: str) -> str:
+    """? → %s outside quoted strings, and a literal % → %% (psycopg2's format)."""
+    out, quote = [], None
+    for ch in sql:
+        if quote:
+            out.append("%%" if ch == "%" else ch)
+            if ch == quote:
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+            out.append(ch)
+        elif ch == "?":
+            out.append("%s")
+        elif ch == "%":
+            out.append("%%")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 class MCNRuntime:
     def __init__(self):
         self.db_connection = None
@@ -23,6 +61,10 @@ class MCNRuntime:
             "anthropic": os.getenv("ANTHROPIC_API_KEY"),
             "google": os.getenv("GOOGLE_AI_KEY"),
         }
+        # Validate API keys are set
+        for provider, key in self.ai_providers.items():
+            if key and len(key) < 10:
+                self.ai_providers[provider] = None
         self.workflows = {}
         self.email_config = {
             "smtp_server": os.getenv("SMTP_SERVER", "smtp.gmail.com"),
@@ -34,8 +76,9 @@ class MCNRuntime:
 
     def log(self, message: Any) -> None:
         """Print message to console with timestamp"""
+        from .display import to_text
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{timestamp}] {message}")
+        print(f"[{timestamp}] {to_text(message)}")
 
     def trigger(
         self, endpoint: str, payload: Dict = None, method: str = "POST"
@@ -46,18 +89,18 @@ class MCNRuntime:
 
             if method.upper() == "GET":
                 response = requests.get(
-                    endpoint, params=payload, headers=headers, timeout=30
+                    endpoint, params=payload, headers=headers, timeout=_http_timeout()
                 )
             elif method.upper() == "POST":
                 response = requests.post(
-                    endpoint, json=payload, headers=headers, timeout=30
+                    endpoint, json=payload, headers=headers, timeout=_http_timeout()
                 )
             elif method.upper() == "PUT":
                 response = requests.put(
-                    endpoint, json=payload, headers=headers, timeout=30
+                    endpoint, json=payload, headers=headers, timeout=_http_timeout()
                 )
             elif method.upper() == "DELETE":
-                response = requests.delete(endpoint, headers=headers, timeout=30)
+                response = requests.delete(endpoint, headers=headers, timeout=_http_timeout())
             else:
                 raise Exception(f"Unsupported HTTP method: {method}")
 
@@ -79,6 +122,12 @@ class MCNRuntime:
         """Enhanced database query with multi-DB support"""
         if not self.db_connection:
             self._init_database()
+        # query(sql, "one value") — a lone value is one parameter, not a sequence of characters
+        if params is not None and not isinstance(params, (list, tuple, dict)):
+            params = (params,)
+        # Objects and lists are stored as JSON text
+        if isinstance(params, (list, tuple)):
+            params = tuple(json.dumps(p, default=str) if isinstance(p, (dict, list)) else p for p in params)
 
         try:
             if self.db_type == "sqlite":
@@ -93,28 +142,37 @@ class MCNRuntime:
             raise Exception(f"Database error: {str(e)}")
 
     def _query_sqlite(self, sql: str, params: tuple = None) -> List[Dict]:
-        """SQLite query execution"""
-        cursor = self.db_connection.cursor()
-        if params:
-            cursor.execute(sql, params)
-        else:
-            cursor.execute(sql)
+        """SQLite query execution with injection protection"""
+        import re
+        # Basic SQL injection protection
+        if re.search(r'[;\\\x00]', sql):
+            raise Exception("Invalid SQL query detected")
+        
+        with _db_lock:
+            cursor = self.db_connection.cursor()
+            if params:
+                cursor.execute(sql, params)
+            else:
+                cursor.execute(sql)
 
-        if sql.strip().upper().startswith("SELECT"):
-            columns = [description[0] for description in cursor.description]
-            rows = cursor.fetchall()
-            return [dict(zip(columns, row)) for row in rows]
-        else:
+            if sql.strip().upper().startswith("SELECT"):
+                columns = [description[0] for description in cursor.description]
+                rows = cursor.fetchall()
+                return [dict(zip(columns, row)) for row in rows]
             self.db_connection.commit()
             return [{"affected_rows": cursor.rowcount}]
 
     def _query_postgresql(self, sql: str, params: tuple = None) -> List[Dict]:
-        """PostgreSQL query execution"""
+        """PostgreSQL query execution. MCN code uses ? placeholders, as with SQLite."""
         cursor = self.db_connection.cursor()
-        if params:
-            cursor.execute(sql, params)
-        else:
-            cursor.execute(sql)
+        try:
+            if params:
+                cursor.execute(_pg_placeholders(sql), params)
+            else:
+                cursor.execute(sql)
+        except Exception:
+            self.db_connection.rollback()      # otherwise every later query fails too
+            raise
 
         if sql.strip().upper().startswith("SELECT"):
             columns = [desc[0] for desc in cursor.description]
@@ -276,62 +334,10 @@ class MCNRuntime:
             return f"Google AI Error: {str(e)}"
 
     def _init_database(self, db_path: str = "mcn_data.db"):
-        """Initialize SQLite database connection"""
-        self.db_connection = sqlite3.connect(db_path)
-
-        # Create sample tables for demo
-        cursor = self.db_connection.cursor()
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                email TEXT UNIQUE,
-                age INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """
-        )
-
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS tasks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                description TEXT,
-                status TEXT DEFAULT 'pending',
-                user_id INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users (id)
-            )
-        """
-        )
-
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS ai_content (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                type TEXT NOT NULL,
-                prompt TEXT,
-                response TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """
-        )
-
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS weather_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                city TEXT,
-                temperature REAL,
-                description TEXT,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """
-        )
-
-        self.db_connection.commit()
+        """Open the SQLite database. Programs create their own tables; none are
+        pre-created, so a script's CREATE TABLE IF NOT EXISTS always takes effect."""
+        # `task` runs functions in worker threads; _db_lock serialises access
+        self.db_connection = sqlite3.connect(db_path, check_same_thread=False)
 
     def register_workflow(self, name: str, func):
         """Register a custom workflow function"""
@@ -341,7 +347,7 @@ class MCNRuntime:
         """Connect to a specific database"""
         if self.db_connection:
             self.db_connection.close()
-        self.db_connection = sqlite3.connect(db_path)
+        self.db_connection = sqlite3.connect(db_path, check_same_thread=False)
 
     def close_database(self):
         """Close database connection"""
@@ -427,13 +433,21 @@ class MCNRuntime:
             return f"Date format error: {str(e)}"
 
     def connect_postgresql(
-        self, host: str, database: str, user: str, password: str, port: int = 5432
+        self, host: str, database: str = None, user: str = None, password: str = None, port: int = 5432
     ):
-        """Connect to PostgreSQL database"""
+        """Connect to PostgreSQL: connect_postgresql(host, database, user, password, port?),
+        or one URL such as env("DATABASE_URL") from Vercel Postgres, Neon or Supabase."""
         try:
-            self.db_connection = psycopg2.connect(
-                host=host, database=database, user=user, password=password, port=port
-            )
+            import psycopg2
+        except ImportError:
+            return {"success": False, "error": "PostgreSQL support isn't installed. Run: mcn add postgres"}
+        try:
+            if database is None and str(host).startswith(("postgres://", "postgresql://")):
+                self.db_connection = psycopg2.connect(str(host))
+            else:
+                self.db_connection = psycopg2.connect(
+                    host=host, database=database, user=user, password=password, port=port
+                )
             self.db_type = "postgresql"
             return {"success": True, "message": "Connected to PostgreSQL"}
         except Exception as e:
@@ -441,6 +455,10 @@ class MCNRuntime:
 
     def connect_mongodb(self, connection_string: str, database_name: str):
         """Connect to MongoDB database"""
+        try:
+            import pymongo
+        except ImportError:
+            return {"success": False, "error": "MongoDB support isn't installed. Run: mcn add mongodb"}
         try:
             client = pymongo.MongoClient(connection_string)
             self.db_connection = client[database_name]
@@ -451,9 +469,11 @@ class MCNRuntime:
 
     def _setup_logging(self):
         """Setup enhanced logging"""
+        console = logging.StreamHandler()
+        console.setLevel(logging.INFO if os.environ.get("MCN_VERBOSE") else logging.WARNING)
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s - %(levelname)s - %(message)s",
-            handlers=[logging.FileHandler("mcn_runtime.log"), logging.StreamHandler()],
+            handlers=[logging.FileHandler(_runtime_log_path()), console],
         )
         self.logger = logging.getLogger(__name__)

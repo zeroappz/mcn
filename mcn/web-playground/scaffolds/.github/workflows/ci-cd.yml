@@ -1,0 +1,56 @@
+name: MCN CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install MCN
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/LeninPrakash41/mcn/main/install.sh | sh
+          echo "$HOME/.mcn/bin" >> "$GITHUB_PATH"
+
+      - name: Check and test the backend
+        run: |
+          mcn validate
+          mcn test backend/
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build the frontend
+        run: |
+          if [ -d frontend ]; then
+            cd frontend
+            npm ci || npm install
+            npm run build
+          fi
+
+  docker-build:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build production image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: mcn-app:latest
